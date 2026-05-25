@@ -10,19 +10,18 @@
 //
 // GUI LAYOUT (top to bottom):
 //
-//   ┌──────────────────────────────────────────────┐
-//   │              BADTVibe                        │  Title bar
-//   ├──────────────────────────────────────────────┤
-//   │ VU│ IN  │  TIME  │  AMP   │ PITCH │ OUT │VU │  Main row
-//   │   │GAIN │        │        │       │GAIN │   │
-//   ├──────────────────────────────────────────────┤
-//   │        │DRY PAN│            │WET PAN│        │  Pan row
-//   │        │(dbl-clk            │(dbl-clk        │
-//   │        │→ Dry EQ)           │→ Wet EQ)       │
-//   └──────────────────────────────────────────────┘
+//   ┌─────────────────────────────────────────────────────────┐
+//   │                    BADT                           [OUT] │  Title + VU
+//   ├─────────────────────────────────────────────────────────┤
+//   │          │  TIME  │  AMP   │ PITCH │                    │  Main row
+//   ├─────────────────────────────────────────────────────────┤
+//   │ DVOL│DRY PAN│     LFO     │WET PAN│WVOL│               │  Pan row
+//   │     │(dbl-clk             │(dbl-clk    │               │
+//   │     │→ Dry EQ)            │→ Wet EQ)   │               │
+//   └─────────────────────────────────────────────────────────┘
 //
-//   When a pan knob is double-clicked, an EQ panel slides over the whole
-//   plugin window, showing a 3-band parametric EQ for that signal path.
+//   Double-clicking a pan knob opens the EQ for that path in its own
+//   floating OS window (addToDesktop) — not an overlay.
 //
 // =============================================================================
 #pragma once
@@ -278,17 +277,16 @@ private:
     juce::Slider lfoRateKnob;
     juce::Label  lfoRateLabel;
 
-    // ===== Gain knobs (smaller, uses regular Slider) =====
-    juce::Slider inGainKnob, outGainKnob;
-    juce::Label  inGainLabel, outGainLabel;
-
     // ===== Pan knobs (DoubleClickKnob to intercept double-click → EQ) =====
     DoubleClickKnob dryPanKnob, wetPanKnob;
     juce::Label     dryPanLabel, wetPanLabel;
 
-    // ===== VU meters =====
-    VUMeterComponent inputVUL, inputVUR;    // Left + Right input
-    VUMeterComponent outputVUL, outputVUR;  // Left + Right output
+    // ===== Per-path volume faders (next to their pan knobs) =====
+    juce::Slider dryVolKnob, wetVolKnob;
+    juce::Label  dryVolLabel, wetVolLabel;
+
+    // ===== Single output VU meter =====
+    VUMeterComponent outputVUL;
 
     // ===== APVTS Slider Attachments =====
     // Each attachment binds a Slider widget to an APVTS parameter.
@@ -296,7 +294,7 @@ private:
     // Declaring them AFTER the sliders in the header ensures correct destruction order.
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         timeAttach, ampAttach, pitchAttach,
-        inGainAttach, outGainAttach,
+        dryVolAttach, wetVolAttach,
         dryPanAttach, wetPanAttach,
         lfoRateAttach;
 

@@ -8,7 +8,7 @@
 #include <cmath>
 #include <algorithm>
 
-#include <signalsmith-stretch/signalsmith-stretch.h>
+#include <rubberband/RubberBandLiveShifter.h>
 
 
 // =============================================================================
@@ -195,46 +195,226 @@ private:
 
 
 // =============================================================================
-// CLASS: PitchProcessor  (signalsmith-stretch wrapper)
+// CLASS: PitchProcessor  (RubberBandLiveShifter wrapper)
 // =============================================================================
+//
+// What this does:
+//   Wraps RubberBandLiveShifter to provide simple in-place pitch shifting on a
+//   mono float buffer. You call setPitchCents() once per block, then processBlock()
+//   to apply the shift.
+//
+// Why RubberBandLiveShifter?
+//   The Rubber Band Library's LiveShifter is designed specifically for pitch-only
+//   shifting in real time — it does NOT change playback speed (time stretching).
+//   It handles polyphonic and complex audio sources far better than SoundTouch
+//   because it uses a high-quality phase-vocoder algorithm with a smarter
+//   transient-handling system.
+//
+// The block-size bridging problem:
+//   RubberBandLiveShifter requires EXACTLY getBlockSize() samples per shift()
+//   call. However, the DAW may deliver any block size (64, 128, 512, 2048 …).
+//   We bridge the gap with two FIFO queues:
+//     inputFifo  — accumulates incoming host samples until we have a full RB block
+//     outputFifo — holds processed samples until the host asks for them
+//
+// Real-time safety:
+//   All memory is pre-allocated in prepare(). After that, no allocation happens
+//   inside processBlock() — essential to prevent audio glitches on the audio thread.
+//   We use std::vector with reserve() so insert() never triggers reallocation.
+//
 class PitchProcessor
 {
 public:
-    void prepare(double newSampleRate, int newMaxBlockSize)
+    PitchProcessor()  = default;
+    ~PitchProcessor() = default;
+
+    // -------------------------------------------------------------------------
+    // prepare()  —  called before playback starts (or when sample rate changes)
+    // -------------------------------------------------------------------------
+    void prepare(double newSampleRate, int maxHostBlockSize)
     {
-        stretcher.presetDefault(1, static_cast<float>(newSampleRate));
-        stretcher.reset();
-        outputBuf.resize(static_cast<size_t>(newMaxBlockSize));
+        // Create a new LiveShifter for this sample rate.
+        //
+        // RubberBandLiveShifter(sampleRate, channels, options):
+        //   sampleRate — audio sample rate in Hz (e.g. 44100, 48000)
+        //   channels   — 1 because BADT sums to mono before pitch shifting
+        //   options    — OptionWindowShort: smaller FFT window = ~50ms latency
+        //                (vs ~100ms for OptionWindowMedium).
+        //                Quality is excellent for the ±50 cent range used here.
+        //
+        // std::make_unique<T>(...) is the C++14 way to create a heap object and
+        // store it in a smart pointer. When this PitchProcessor is destroyed,
+        // the shifter is automatically deleted — no manual delete needed.
+        shifter = std::make_unique<RubberBand::RubberBandLiveShifter>(
+            static_cast<size_t>(newSampleRate),
+            1,
+            RubberBand::RubberBandLiveShifter::OptionWindowShort
+        );
+
+        // Query the block size RubberBand requires for every shift() call.
+        // This is fixed for the lifetime of this shifter (determined by the
+        // FFT window size and sample rate). Typically 256 at 44100 Hz.
+        rbBlockSize = static_cast<int>(shifter->getBlockSize());
+
+        // Allocate a scratch buffer for one block of RubberBand output.
+        // assign(n, 0.0f) fills a vector with n zeros.
+        rbOutputBlock.assign(static_cast<size_t>(rbBlockSize), 0.0f);
+
+        // Pre-allocate both FIFOs so no allocation can happen on the audio thread.
+        //
+        // How much to reserve:
+        //   In steady state, inputFifo holds at most (rbBlockSize - 1) leftover
+        //   samples from the last block. The new host block adds maxHostBlockSize.
+        //   So the peak size is (rbBlockSize - 1) + maxHostBlockSize.
+        //   We add rbBlockSize * 2 extra for safety, plus a 128-sample margin.
+        //
+        // reserve() sets aside memory without changing the vector's logical size.
+        // After this, insert(end(), ...) will not trigger any reallocation as long
+        // as we stay within the reserved capacity — which we always do here.
+        const int reserveSize = maxHostBlockSize + rbBlockSize * 2 + 128;
+        inputFifo.reserve(static_cast<size_t>(reserveSize));
+        outputFifo.reserve(static_cast<size_t>(reserveSize));
+        inputFifo.clear();
+        outputFifo.clear();
+
+        currentCents = 0.0f;
     }
 
-    void reset() { stretcher.reset(); }
+    // -------------------------------------------------------------------------
+    // reset()  —  flush internal state when playback stops
+    // -------------------------------------------------------------------------
+    void reset()
+    {
+        // RubberBand's reset() clears its internal FFT overlap-add state and
+        // delay lines so stale audio from a previous session doesn't bleed in.
+        if (shifter) shifter->reset();
 
+        // Empty both FIFOs so no old samples queue up into the next session.
+        inputFifo.clear();
+        outputFifo.clear();
+    }
+
+    // -------------------------------------------------------------------------
+    // setPitchCents()  —  set the pitch shift amount
+    // -------------------------------------------------------------------------
+    // Call this once per block before processBlock().
+    // cents: positive = shift up, negative = shift down.
+    //        100 cents = 1 semitone.  0 cents = no shift.
     void setPitchCents(float cents)
     {
         currentCents = cents;
-        stretcher.setTransposeSemitones(cents / 100.0f);
+        if (!shifter) return;
+
+        // Convert cents to a linear frequency ratio for RubberBand.
+        //
+        // RubberBand uses ratios:
+        //   1.0 = unison (no change)
+        //   2.0 = one octave up   (frequency × 2)
+        //   0.5 = one octave down (frequency ÷ 2)
+        //
+        // Formula: ratio = 2 ^ (cents / 1200)
+        //   Why 1200? — 1 octave = 12 semitones × 100 cents/semitone = 1200 cents.
+        //   So 2^(1200/1200) = 2^1 = 2.0 (octave up). Checks out. ✓
+        //
+        // Examples:
+        //   +100 cents → 2^(100/1200) ≈ 1.0595  (one semitone up)
+        //    +50 cents → 2^(50/1200)  ≈ 1.0293  (quarter-tone up)
+        //      0 cents → 2^0           = 1.0000  (no change)
+        //    -50 cents → 2^(-50/1200) ≈ 0.9716  (quarter-tone down)
+        const double ratio = std::pow(2.0, static_cast<double>(cents) / 1200.0);
+        shifter->setPitchScale(ratio);
     }
 
+    // -------------------------------------------------------------------------
+    // processBlock()  —  apply pitch shift in-place
+    // -------------------------------------------------------------------------
+    // Reads from samples[], writes the pitch-shifted result back to samples[].
+    // numSamples can be any size — we bridge to RubberBand's fixed block size.
     void processBlock(float* samples, int numSamples)
     {
-        // Skip the stretcher entirely when pitch is zero — no audible effect and
-        // avoids triggering signalsmith-stretch's STFT paths before any pitch is set.
-        if (currentCents == 0.0f)
+        if (!shifter) return;
+
+        // ---- STEP 1: Push incoming host samples into the input FIFO ----
+        //
+        // insert(end(), ptr, ptr+n) appends n elements from a raw array.
+        // Because we called reserve() in prepare(), this never allocates.
+        inputFifo.insert(inputFifo.end(), samples, samples + numSamples);
+
+        // ---- STEP 2: Drain the input FIFO in fixed RubberBand blocks ----
+        //
+        // RubberBand's shift() must receive EXACTLY rbBlockSize samples every time.
+        // We loop as long as there are enough samples waiting in the FIFO.
+        while (static_cast<int>(inputFifo.size()) >= rbBlockSize)
         {
-            stretcher.reset();
-            return;
+            // shift() takes arrays of channel pointers — one pointer per channel.
+            // We have 1 channel (mono), so each array has just one element.
+            // inputFifo.data() always points to the FIRST (oldest) sample in the
+            // vector, which is the correct "front of queue" position.
+            const float* inPtrs[1]  = { inputFifo.data() };
+            float*       outPtrs[1] = { rbOutputBlock.data() };
+
+            // This is the core pitch-shifting call.
+            // Reads exactly rbBlockSize samples from inPtrs[0].
+            // Writes exactly rbBlockSize pitch-shifted samples to outPtrs[0].
+            shifter->shift(inPtrs, outPtrs);
+
+            // Remove the consumed samples from the front of the input FIFO.
+            // erase(begin, begin+n) shifts all later elements leftward — O(n) copy,
+            // but n is at most rbBlockSize (typically 256) so this is very fast.
+            inputFifo.erase(inputFifo.begin(),
+                            inputFifo.begin() + rbBlockSize);
+
+            // Append the processed output block to the output FIFO.
+            outputFifo.insert(outputFifo.end(),
+                              rbOutputBlock.begin(),
+                              rbOutputBlock.end());
         }
-        if (numSamples > static_cast<int>(outputBuf.size()))
-            outputBuf.resize(static_cast<size_t>(numSamples));
-        float* in[1]  = { samples };
-        float* out[1] = { outputBuf.data() };
-        stretcher.process(in, numSamples, out, numSamples);
-        std::copy(outputBuf.begin(), outputBuf.begin() + numSamples, samples);
+
+        // ---- STEP 3: Pull numSamples from the output FIFO into samples[] ----
+        //
+        // In steady state the output FIFO always has enough samples after step 2.
+        // The only exception is the very first block after prepare() — before
+        // RubberBand has produced any output yet ("pipeline warm-up" latency).
+        if (static_cast<int>(outputFifo.size()) >= numSamples)
+        {
+            // Copy the front numSamples from the FIFO back to the caller's buffer.
+            // std::copy works on any iterator range; for vector it's essentially memcpy.
+            std::copy(outputFifo.begin(),
+                      outputFifo.begin() + numSamples,
+                      samples);
+
+            // Remove those samples from the front of the output FIFO.
+            outputFifo.erase(outputFifo.begin(),
+                             outputFifo.begin() + numSamples);
+        }
+        else
+        {
+            // Pipeline not yet full — output silence this block.
+            // This only happens for the first block or two after prepare().
+            // On the wet path this brief silence is hidden by the delay buffer.
+            std::fill(samples, samples + numSamples, 0.0f);
+        }
     }
 
 private:
-    signalsmith::stretch::SignalsmithStretch<float> stretcher;
-    std::vector<float> outputBuf;
+    // The RubberBand LiveShifter object.
+    // unique_ptr manages its lifetime — automatically deleted when we are.
+    std::unique_ptr<RubberBand::RubberBandLiveShifter> shifter;
+
+    // The fixed block size that shift() requires per call.
+    // Queried after construction; does not change until prepare() is called again.
+    int rbBlockSize = 512;
+
+    // One block of output scratch space, reused every RubberBand pass.
+    std::vector<float> rbOutputBlock;
+
+    // Input FIFO: accumulates host audio until we have a full RubberBand block.
+    // Output FIFO: holds processed audio until the host reads it.
+    // Both are pre-allocated in prepare() — no audio-thread allocation occurs.
+    std::vector<float> inputFifo;
+    std::vector<float> outputFifo;
+
+    // The most recently set shift amount in cents (kept for reference).
     float currentCents = 0.0f;
 };
 
@@ -282,6 +462,12 @@ public:
     static constexpr const char* PARAM_DRY_PAN = "DRY_PAN";
     static constexpr const char* PARAM_WET_PAN = "WET_PAN";
 
+    // Per-path volume faders (-24 to +6 dB).
+    // DRY_VOL scales the unprocessed signal before it reaches the mix output.
+    // WET_VOL replaces the old hard-coded -6 dB wet offset — now user-adjustable.
+    static constexpr const char* PARAM_DRY_VOL = "DRY_VOL";
+    static constexpr const char* PARAM_WET_VOL = "WET_VOL";
+
     static constexpr const char* PARAM_D_EQ1_FREQ = "D_EQ1_FREQ";
     static constexpr const char* PARAM_D_EQ1_Q    = "D_EQ1_Q";
     static constexpr const char* PARAM_D_EQ1_GAIN = "D_EQ1_GAIN";
@@ -304,11 +490,9 @@ public:
 
     static constexpr const char* PARAM_LFO_RATE = "LFO_RATE";
 
-    // ---- VU levels (written by audio thread, read by GUI) ----
-    std::atomic<float> inputLevelL  { 0.0f };
-    std::atomic<float> inputLevelR  { 0.0f };
+    // ---- VU level (written by audio thread, read by GUI) ----
+    // Single output level: peak of max(|left|, |right|) across the block.
     std::atomic<float> outputLevelL { 0.0f };
-    std::atomic<float> outputLevelR { 0.0f };
 
     // ---- Solo path flags (written by GUI, read by audio thread) ----
     // soloDry = suppress wet path (hear dry only)
@@ -341,9 +525,19 @@ private:
     SignalAnalyzer  analyzer;
     PitchProcessor  pitchProcessor;
 
-    float blockDelaySamples = 0.0f; // delay position used for the current block
-    float prevDelaySamples  = 0.0f; // delay position from the previous block (crossfade)
-    float lfoPhase          = 0.0f; // LFO phase accumulator 0..1
+    // Dual-head crossfader for the amplitude-driven delay.
+    //
+    // When the target delay changes, we DON'T ramp the read position (that causes
+    // pitch shift). Instead we snap instantly to the new position (head A) and
+    // crossfade the audio from the old position (head B) over a short window.
+    // Both heads read at a constant sample offset during the crossfade, so neither
+    // produces any pitch artifact — only the blend changes.
+    float delayHeadA         = 0.0f;  // current (target) read position in samples
+    float delayHeadB         = 0.0f;  // previous read position, fading out
+    int   xfadeSamplesLeft   = 0;     // countdown: samples remaining in crossfade
+    int   xfadeLengthSamples = 441;   // total crossfade length (recomputed in prepare())
+
+    float lfoPhase = 0.0f; // LFO phase accumulator 0..1
 
     juce::dsp::IIR::Filter<float> dryEqBand1, dryEqBand2, dryEqBand3;
     juce::dsp::IIR::Filter<float> wetEqBand1, wetEqBand2, wetEqBand3;

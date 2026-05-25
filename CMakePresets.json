@@ -1,0 +1,30 @@
+{
+    "version": 3,
+
+    "configurePresets": [
+        {
+            "name": "vs2022-x64",
+            "displayName": "Visual Studio 2022 (64-bit)",
+            "description": "Generates a Visual Studio 2022 solution targeting 64-bit Windows",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "JUCE_PATH": "C:/Users/Will/Documents/JUCE"
+            }
+        },
+        {
+            "name": "vs2022-x64-release",
+            "displayName": "Visual Studio 2022 (64-bit, Release)",
+            "description": "Same as vs2022-x64 but with optimisations enabled for final builds",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/build-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "JUCE_PATH": "C:/Users/Will/Documents/JUCE"
+            }
+        }
+    ]
+}

@@ -1,10 +1,9 @@
 // =============================================================================
-// PluginProcessor.cpp  —  BADTVibe
+// PluginProcessor.cpp  —  BADT
 // =============================================================================
 //
 // All audio processing logic lives here.
-//
-// Pitch shifting via signalsmith-stretch (always active, no preprocessor flag).
+// Pitch shifting via RubberBandLiveShifter (see PitchProcessor in PluginProcessor.h).
 //
 // =============================================================================
 
@@ -39,8 +38,19 @@ static constexpr double SENSOR_SMOOTH_MS = 25.0;
 //
 // Defaults below are reasonable starting values for mixed-instrument content.
 // A signal at or below MIN maps to 0.0; at or above MAX maps to 1.0.
-static constexpr float PITCH_NORM_MIN_HZ = 80.0f;   // e.g. low E on bass guitar
-static constexpr float PITCH_NORM_MAX_HZ = 1200.0f; // e.g. upper vocal range
+//
+// Calibrated so the typical 200–500 Hz range (voice, guitar, piano melody)
+// maps to 0.20–0.50 — matching the amplitude sensor's output for the same
+// material. This keeps the PITCH and AMP sensor modes feeling equally "hot":
+//
+//   150 Hz → 0.15  (low outlier: bass guitar open low-E ≈ 82 Hz would be 0.08)
+//   200 Hz → 0.20  (lower end of typical melodic content)
+//   500 Hz → 0.50  (upper end of typical melodic content)
+//   700 Hz → 0.70  (high outlier: bright whistling, piccolo, etc.)
+//
+// If your source is unusually bass-heavy or treble-heavy, raise or lower MAX.
+static constexpr float PITCH_NORM_MIN_HZ =    0.0f;
+static constexpr float PITCH_NORM_MAX_HZ = 1000.0f;
 
 
 // =============================================================================
@@ -162,6 +172,27 @@ BADTAudioProcessor::createParameterLayout()
         juce::ParameterID{ PARAM_WET_PAN, 1 }, "Wet Pan",
         juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f, 1.0f),
         0.0f));
+
+    // ------------------------------------------------------------------
+    // DRY VOL  —  volume fader for the unprocessed dry signal.
+    // Range: -24 to +6 dB.  Default: 0 dB (unity gain).
+    // Placed next to the DRY PAN knob in the GUI.
+    // ------------------------------------------------------------------
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{ PARAM_DRY_VOL, 1 }, "Dry Volume (dB)",
+        juce::NormalisableRange<float>(-24.0f, 6.0f, 0.1f, 1.0f),
+        0.0f));
+
+    // ------------------------------------------------------------------
+    // WET VOL  —  volume fader for the processed (delayed/pitched) signal.
+    // Range: -24 to +6 dB.  Default: -6 dB (sits under the dry by default).
+    // Replaces the old hard-coded -6 dB offset — now freely adjustable.
+    // Placed next to the WET PAN knob in the GUI.
+    // ------------------------------------------------------------------
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{ PARAM_WET_VOL, 1 }, "Wet Volume (dB)",
+        juce::NormalisableRange<float>(-24.0f, 6.0f, 0.1f, 1.0f),
+        -6.0f));
 
     // ------------------------------------------------------------------
     // LFO RATE  —  sinusoidal oscillation of the wet delay position.
@@ -286,12 +317,16 @@ void BADTAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     currentSampleRate = sampleRate;
     currentBlockSize  = samplesPerBlock;
 
-    // Calculate sample counts for 20ms and 30ms at this sample rate.
-    // The buffer is 30ms total; the analysis window and max delay use 20ms.
-    // The extra 10ms headroom prevents interpolation from reading past the buffer end.
-    analysisSamples  = static_cast<int>(sampleRate * 0.020);
-    maxDelaySamples  = analysisSamples;
-    int bufferSamples = static_cast<int>(sampleRate * 0.030) + 2; // +2 for interpolation safety
+    // Analysis window and max delay: both 20ms.
+    // The YIN pitch detector and amplitude sensor both look at the last 20ms of audio.
+    // The max delay matches so a fully-driven Time knob can shift the wet signal by up
+    // to 20ms relative to dry — clearly audible as a pre/post echo on transients.
+    analysisSamples = static_cast<int>(sampleRate * 0.020);
+    maxDelaySamples = analysisSamples;
+
+    // Buffer is 30ms: 20ms for the delay read + 10ms headroom so the interpolation
+    // (which reads one sample ahead) never goes out of bounds.
+    int bufferSamples = static_cast<int>(sampleRate * 0.030) + 2;
 
     // --- Circular buffer ---
     delayBuffer.prepare(bufferSamples);
@@ -303,9 +338,14 @@ void BADTAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     pitchProcessor.prepare(sampleRate, samplesPerBlock);
     pitchProcessor.reset();
 
-    // --- Block-level delay state ---
-    blockDelaySamples = 0.0f;
-    prevDelaySamples  = 0.0f;
+    // --- Dual-head crossfader ---
+    // Crossfade length: ~10ms worth of samples. Short enough to be inaudible
+    // as a blend, long enough to completely mask the click from a delay snap.
+    xfadeLengthSamples = static_cast<int>(sampleRate * 0.010);
+    delayHeadA       = 0.0f;
+    delayHeadB       = 0.0f;
+    xfadeSamplesLeft = 0;
+    lfoPhase         = 0.0f;
 
     // --- EQ filter setup ---
     // juce::dsp::ProcessSpec describes the audio format our filters will process.
@@ -522,15 +562,16 @@ void BADTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     const float ts         = *apvts.getRawParameterValue(PARAM_TIME);
     const float ampControl = *apvts.getRawParameterValue(PARAM_AMP);
     const float pitchCtrl  = *apvts.getRawParameterValue(PARAM_PITCH);
-    const float inGainDB   = *apvts.getRawParameterValue(PARAM_IN_GAIN);
-    const float outGainDB  = *apvts.getRawParameterValue(PARAM_OUT_GAIN);
     const float dryPan     = *apvts.getRawParameterValue(PARAM_DRY_PAN);
     const float wetPan     = *apvts.getRawParameterValue(PARAM_WET_PAN);
 
-    // Convert dB gain values to linear multipliers.
-    // decibelsToGain(0 dB) = 1.0 (unity), decibelsToGain(6 dB) ≈ 2.0, etc.
-    const float inGainLinear  = juce::Decibels::decibelsToGain(inGainDB);
-    const float outGainLinear = juce::Decibels::decibelsToGain(outGainDB);
+    // Per-path volume from the DRY VOL / WET VOL knobs (dB → linear).
+    // dryVolLinear scales the dry signal in the final mix.
+    // wetVolLinear replaces the old hard-coded -6 dB offset on the wet path.
+    const float dryVolLinear = juce::Decibels::decibelsToGain(
+        *apvts.getRawParameterValue(PARAM_DRY_VOL));
+    const float wetVolLinear = juce::Decibels::decibelsToGain(
+        *apvts.getRawParameterValue(PARAM_WET_VOL));
 
     // -----------------------------------------------------------------------
     // Update EQ filter coefficients if knobs have changed.
@@ -602,33 +643,48 @@ void BADTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     // from sample-rate updates to human ears.
     // -----------------------------------------------------------------------
 
-    // Block-level delay: set once per block (not per sample) to avoid the pitch
-    // artifact that per-sample ramping causes (ramp rate → playback rate → pitch shift).
-    const float newDelaySamples = bypassTime.load(std::memory_order_relaxed)
-                                  ? 0.0f
-                                  : computeTargetDelaySamples(ts);
+    // -----------------------------------------------------------------------
+    // Amplitude-driven delay — dual-head crossfade (no pitch shift).
+    //
+    // We compute the target delay once per block and SNAP the read head to it
+    // immediately. If the position changed, we start a crossfade: head A reads
+    // the new position, head B reads the old position. Both are constant during
+    // the crossfade, so neither causes a pitch change. The blend just hides the
+    // click from the instantaneous position jump.
+    //
+    // If a new change arrives before the previous crossfade completes, we
+    // compute the current in-progress blend value and use that as the new B,
+    // so the transition is always smooth regardless of how fast amplitude moves.
+    // -----------------------------------------------------------------------
+    const float ampDelayTarget = bypassTime.load(std::memory_order_relaxed)
+                                 ? 0.0f
+                                 : computeTargetDelaySamples(ts);
 
-    // LFO: sinusoidal modulation of the delay position at block rate.
-    const float lfoRate = *apvts.getRawParameterValue(PARAM_LFO_RATE);
-    if (lfoRate > 0.0f)
+    if (std::abs(ampDelayTarget - delayHeadA) > 0.5f)
     {
-        lfoPhase += lfoRate * static_cast<float>(numSamples)
-                  / static_cast<float>(currentSampleRate);
-        if (lfoPhase >= 1.0f) lfoPhase -= 1.0f;
+        // If mid-crossfade, compute the current blend position as the new B
+        // so we don't snap the outgoing fade to a stale position.
+        if (xfadeSamplesLeft > 0)
+        {
+            const float t = static_cast<float>(xfadeSamplesLeft)
+                          / static_cast<float>(xfadeLengthSamples);
+            delayHeadB = delayHeadA * (1.0f - t) + delayHeadB * t;
+        }
+        else
+        {
+            delayHeadB = delayHeadA;
+        }
+
+        delayHeadA       = ampDelayTarget;
+        xfadeSamplesLeft = xfadeLengthSamples;
     }
-    const float lfoOffset = (lfoRate > 0.0f)
-        ? (std::sin(juce::MathConstants<float>::twoPi * lfoPhase)
-           * static_cast<float>(maxDelaySamples) * 0.5f)
-        : 0.0f;
 
-    blockDelaySamples = juce::jlimit(0.0f,
-        static_cast<float>(maxDelaySamples - 1),
-        newDelaySamples + lfoOffset);
-
-    // 32-sample crossfade when delay jumps significantly — prevents audible clicks
-    // without the pitch artifact of a per-sample ramp.
-    const int  XFADE        = std::min(32, numSamples);
-    const bool delayChanged = std::abs(blockDelaySamples - prevDelaySamples) > 0.5f;
+    // LFO: read rate constant once per block, evaluated per sample below.
+    // The LFO adds a sinusoidal offset to the read position — this intentionally
+    // creates vibrato (mild pitch modulation) which is the chorusing character of
+    // the effect. Unlike the Time knob, the LFO's job IS to wobble pitch slightly.
+    const float lfoRate      = *apvts.getRawParameterValue(PARAM_LFO_RATE);
+    const float lfoHalfDepth = static_cast<float>(maxDelaySamples) * 0.5f;
 
     // bypassAmp: skip amplitude modulation — use unity gain (1.0 = no change).
     const float amplitudeGain = bypassAmp.load(std::memory_order_relaxed)
@@ -651,53 +707,63 @@ void BADTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     //
     // For each sample in this block:
     //   a) Sum stereo input to mono
-    //   b) Apply input gain
-    //   c) Track input VU level
-    //   d) Write to circular delay buffer
-    //   e) Pull DRY sample (no delay) into dryWorkBuffer
-    //   f) Pull WET sample (delay advances one step per sample) into wetWorkBuffer
+    //   b) Write to circular delay buffer
+    //   c) Pull DRY sample (no delay) into dryWorkBuffer
+    //   d) Pull WET sample (delay position modulated per sample) into wetWorkBuffer
     // -----------------------------------------------------------------------
-    float blockInputPeakL = 0.0f, blockInputPeakR = 0.0f; // Track peak for VU meters
-
     for (int i = 0; i < numSamples; ++i)
     {
         // (a) Sum to mono. If input is stereo, average L and R.
         //     This halves the amplitude (+3 dB per channel normally handled by convention).
         float monoSample = sumToMono(buffer, i);
 
-        // (b) Apply input gain (linear multiplier).
-        monoSample *= inGainLinear;
-
-        // (c) Track input peak level for each channel.
-        //     We compare absolute values (magnitude regardless of polarity).
-        float absLeft  = std::abs(buffer.getSample(0, i) * inGainLinear);
-        float absRight = (buffer.getNumChannels() > 1)
-                         ? std::abs(buffer.getSample(1, i) * inGainLinear)
-                         : absLeft;
-        if (absLeft  > blockInputPeakL) blockInputPeakL = absLeft;
-        if (absRight > blockInputPeakR) blockInputPeakR = absRight;
-
-        // (d) Write the gain-adjusted mono sample into the circular buffer.
+        // (b) Write the mono sample into the circular buffer.
         //     This feeds both the delay read (wet path) and the analysis window.
         delayBuffer.write(monoSample);
 
-        // (e) Dry path: take the current sample directly (no delay).
+        // (c) Dry path: take the current sample directly (no delay).
         dryWorkBuffer[static_cast<size_t>(i)] = monoSample;
 
-        // (f) Wet path: read from the buffer at the block-level delay position.
-        //     Crossfade the first XFADE samples when the position jumped to avoid clicks.
-        const float delayPos = (delayChanged && i < XFADE)
-            ? juce::jmap(static_cast<float>(i), 0.0f, static_cast<float>(XFADE),
-                         prevDelaySamples, blockDelaySamples)
-            : blockDelaySamples;
-        wetWorkBuffer[static_cast<size_t>(i)] = delayBuffer.readDelayedInterpolated(delayPos);
+        // (f) Wet path: dual-head crossfader + LFO.
+
+        // LFO: advance phase one sample and compute sinusoidal offset.
+        if (lfoRate > 0.0f)
+        {
+            lfoPhase += lfoRate / static_cast<float>(currentSampleRate);
+            if (lfoPhase >= 1.0f) lfoPhase -= 1.0f;
+        }
+        const float lfoOffset = (lfoRate > 0.0f)
+            ? std::sin(juce::MathConstants<float>::twoPi * lfoPhase) * lfoHalfDepth
+            : 0.0f;
+
+        // Read from head A (current target) and head B (outgoing position).
+        // The LFO offset is added to both so the vibrato effect is preserved
+        // consistently across the crossfade.
+        const float maxPos = static_cast<float>(maxDelaySamples - 1);
+        const float posA   = juce::jlimit(0.0f, maxPos, delayHeadA + lfoOffset);
+        const float sampleA = delayBuffer.readDelayedInterpolated(posA);
+
+        float wetSample;
+        if (xfadeSamplesLeft > 0)
+        {
+            // Crossfade in progress: blend A (fading in) and B (fading out).
+            // t counts from 1.0 down to 0.0 as the crossfade runs.
+            // At t=1.0: all B (old position). At t=0.0: all A (new position).
+            const float posB    = juce::jlimit(0.0f, maxPos, delayHeadB + lfoOffset);
+            const float sampleB = delayBuffer.readDelayedInterpolated(posB);
+            const float t       = static_cast<float>(xfadeSamplesLeft)
+                                / static_cast<float>(xfadeLengthSamples);
+            wetSample = sampleA * (1.0f - t) + sampleB * t;
+            --xfadeSamplesLeft;
+        }
+        else
+        {
+            wetSample = sampleA;
+        }
+
+        wetWorkBuffer[static_cast<size_t>(i)] = wetSample;
     }
 
-    prevDelaySamples = blockDelaySamples;
-
-    // Store the input peak to the atomics (GUI timer thread will read these).
-    inputLevelL.store(blockInputPeakL, std::memory_order_relaxed);
-    inputLevelR.store(blockInputPeakR, std::memory_order_relaxed);
 
     // -----------------------------------------------------------------------
     // STEP 4: Apply dry path EQ.
@@ -728,7 +794,7 @@ void BADTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     // -----------------------------------------------------------------------
     // STEP 6: Apply pitch shifting to the wet buffer.
     //
-    // signalsmith-stretch processes the whole block at once.
+    // RubberBand processes the whole block at once.
     // setPitchCents() was called above with the current shift amount.
     // -----------------------------------------------------------------------
     pitchProcessor.processBlock(wetWorkBuffer.data(), numSamples);
@@ -778,10 +844,7 @@ void BADTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     const float dryMix = (isSoloWet && !isSoloDry) ? 0.0f : 1.0f;
     const float wetMix = (isSoloDry && !isSoloWet) ? 0.0f : 1.0f;
 
-    // Constant -6 dB on the wet channel so it sits under the dry by default.
-    static const float wetLevelLinear = juce::Decibels::decibelsToGain(-6.0f);
-
-    float blockOutputPeakL = 0.0f, blockOutputPeakR = 0.0f;
+    float blockOutputPeak = 0.0f;
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -789,18 +852,19 @@ void BADTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         const float wet = wetWorkBuffer[static_cast<size_t>(i)];
 
         // dryMix / wetMix are 0 when the other path is soloed, 1 otherwise.
-        const float outLeft  = (dry * dryMix * dryL + wet * wetMix * wetL * wetLevelLinear) * outGainLinear;
-        const float outRight = (dry * dryMix * dryR + wet * wetMix * wetR * wetLevelLinear) * outGainLinear;
+        // dryVolLinear / wetVolLinear come from the DRY VOL and WET VOL knobs.
+        const float outLeft  = dry * dryMix * dryL * dryVolLinear + wet * wetMix * wetL * wetVolLinear;
+        const float outRight = dry * dryMix * dryR * dryVolLinear + wet * wetMix * wetR * wetVolLinear;
 
         buffer.setSample(0, i, outLeft);
         buffer.setSample(1, i, outRight);
 
-        if (std::abs(outLeft)  > blockOutputPeakL) blockOutputPeakL = std::abs(outLeft);
-        if (std::abs(outRight) > blockOutputPeakR) blockOutputPeakR = std::abs(outRight);
+        // Track the highest peak across both channels for the single output VU meter.
+        const float peak = std::max(std::abs(outLeft), std::abs(outRight));
+        if (peak > blockOutputPeak) blockOutputPeak = peak;
     }
 
-    outputLevelL.store(blockOutputPeakL, std::memory_order_relaxed);
-    outputLevelR.store(blockOutputPeakR, std::memory_order_relaxed);
+    outputLevelL.store(blockOutputPeak, std::memory_order_relaxed);
 }
 
 

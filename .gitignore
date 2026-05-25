@@ -67,3 +67,6 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# VS Code workspace settings (machine-specific, not part of the project)
+.vscode/

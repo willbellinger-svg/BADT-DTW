@@ -20,7 +20,7 @@
 // X increases rightward; Y increases DOWNWARD.
 //
 static constexpr int WINDOW_WIDTH  = 560;
-static constexpr int WINDOW_HEIGHT = 310;  // +30 for solo button row
+static constexpr int WINDOW_HEIGHT = 310;
 
 // ── Main knob row (Row 1) ─────────────────────────────────────────────────────
 static constexpr int ROW1_LABEL_Y  = 37;   // Top edge of the labels above knobs
@@ -31,64 +31,52 @@ static constexpr int LABEL_H       = 16;   // Height of any label strip
 static constexpr int MAIN_KNOB_W   = 90;
 static constexpr int MAIN_KNOB_H   = 90;  // Total height: ~70px dial + 20px text box
 
-// IN GAIN / OUT GAIN — smaller utility knobs
+// DRY VOL / WET VOL — smaller volume faders; also used for LFO rate knob
 static constexpr int GAIN_KNOB_W   = 52;
-static constexpr int GAIN_KNOB_H   = 72;  // ~52px dial + 20px text box
+static constexpr int GAIN_KNOB_H   = 80;  // Match pan knob height so the row is even
 
-// VU meters — narrow vertical bars, one per channel (L and R).
-// VU_H spans from ROW1_LABEL_Y (37) to the bottom of the knob area (ROW1_KNOB_Y + MAIN_KNOB_H = 145).
-// That distance is (ROW1_KNOB_Y - ROW1_LABEL_Y) + MAIN_KNOB_H = 18 + 90 = 108.
-static constexpr int VU_W          = 12;
+// Single output VU meter — one bar showing max(|L|, |R|) peak.
+// Positioned on the right side of the main knob row.
+// VU_H spans the full label+knob area height (ROW1_KNOB_Y−ROW1_LABEL_Y + MAIN_KNOB_H = 108).
+static constexpr int VU_W          = 16;
 static constexpr int VU_H          = (ROW1_KNOB_Y - ROW1_LABEL_Y) + MAIN_KNOB_H; // 108 px
+static constexpr int X_VU_OUT      = WINDOW_WIDTH - VU_W - 8;                     // 536
 
 // ── Pan knob row (Row 2) ──────────────────────────────────────────────────────
-static constexpr int ROW2_LABEL_Y  = 178;  // shifted down to clear solo-button row
+static constexpr int ROW2_LABEL_Y  = 178;
 static constexpr int ROW2_KNOB_Y   = 196;
 static constexpr int PAN_KNOB_W    = 70;
 static constexpr int PAN_KNOB_H    = 80;
 
 // ── Solo buttons ──────────────────────────────────────────────────────────────
 // Placed directly beneath the DRY PAN and WET PAN knobs.
-// Y = ROW2_KNOB_Y + PAN_KNOB_H + 2 = 196 + 80 + 2 = 278.
-// X matches the respective pan knob: X_DRY_PAN and X_WET_PAN.
 static constexpr int SOLO_Y        = ROW2_KNOB_Y + PAN_KNOB_H + 2;  // 278
 static constexpr int SOLO_H        = 18;
-static constexpr int SOLO_W        = PAN_KNOB_W;  // same width as the pan knob above
+static constexpr int SOLO_W        = PAN_KNOB_W;
 
 // ── Bypass buttons ────────────────────────────────────────────────────────────
-// Placed in the gap between the main knob row and the pan row.
-// ROW1_KNOB_Y (55) + MAIN_KNOB_H (90) + 3 = 148.
-// The gap is 178 - 148 = 30px, so the 18px button fits with 12px of breathing room.
+// Placed in the 30px gap between the main knob row and the pan row.
 static constexpr int BYP_Y         = ROW1_KNOB_Y + MAIN_KNOB_H + 3;  // 148
 static constexpr int BYP_H         = 18;
-static constexpr int BYP_W         = MAIN_KNOB_W;  // same width as the knob above
+static constexpr int BYP_W         = MAIN_KNOB_W;
 
 // ── Horizontal X positions ────────────────────────────────────────────────────
 //
-// Layout (left to right):
-//   [margin] [VU_IN L] [VU_IN R] [gap] [IN_GAIN] [gap] [TIME][AMP][PITCH] [gap] [OUT_GAIN] [gap] [VU_OUT L] [VU_OUT R] [margin]
+// Main row: three modulation knobs centred in the window.
+//   Total knob width: 3 × 90 = 270 px
+//   Left margin to first knob: (560 − 270) / 2 = 145 px
 //
-// Total content:  25 (vu) + 52 (gain) + 270 (3×90) + 52 (gain) + 25 (vu) = 424 px
-// Window:         560 px
-// Remaining:      136 px  →  left margin (10) + 4 gaps (29 each) + right margin (10) = 10+116+10 = 136 ✓
-//
-static constexpr int LEFT_MARGIN   = 10;
-static constexpr int SECTION_GAP   = 29;  // Gap between each major group
-static constexpr int VU_GAP        =  1;  // 1 px between L and R VU bars
+static constexpr int X_TIME     = 145;                     // First main knob
+static constexpr int X_AMP      = X_TIME  + MAIN_KNOB_W;  // 235
+static constexpr int X_PITCH    = X_AMP   + MAIN_KNOB_W;  // 325
 
-static constexpr int X_VU_IN_L  = LEFT_MARGIN;                                   //  10
-static constexpr int X_VU_IN_R  = X_VU_IN_L  + VU_W + VU_GAP;                  //  23
-static constexpr int X_IN_GAIN  = X_VU_IN_R  + VU_W + SECTION_GAP;             //  64
-static constexpr int X_TIME     = X_IN_GAIN  + GAIN_KNOB_W + SECTION_GAP;      // 145
-static constexpr int X_AMP      = X_TIME     + MAIN_KNOB_W;                     // 235
-static constexpr int X_PITCH    = X_AMP      + MAIN_KNOB_W;                     // 325
-static constexpr int X_OUT_GAIN = X_PITCH    + MAIN_KNOB_W + SECTION_GAP;      // 444
-static constexpr int X_VU_OUT_L = X_OUT_GAIN + GAIN_KNOB_W + SECTION_GAP;      // 525
-static constexpr int X_VU_OUT_R = X_VU_OUT_L + VU_W + VU_GAP;                  // 538
+// Pan row: pan knobs centred under their modulation knobs
+static constexpr int X_DRY_PAN  = X_TIME  + (MAIN_KNOB_W - PAN_KNOB_W)  / 2;  // 155
+static constexpr int X_WET_PAN  = X_PITCH + (MAIN_KNOB_W - PAN_KNOB_W)  / 2;  // 335
 
-// Pan knobs are centred horizontally under their respective main knobs
-static constexpr int X_DRY_PAN  = X_TIME  + (MAIN_KNOB_W - PAN_KNOB_W) / 2;  // 155
-static constexpr int X_WET_PAN  = X_PITCH + (MAIN_KNOB_W - PAN_KNOB_W) / 2;  // 335
+// Volume knobs: placed outside the pan knobs (dry vol on left, wet vol on right)
+static constexpr int X_DRY_VOL  = X_DRY_PAN - GAIN_KNOB_W - 8;   //  95
+static constexpr int X_WET_VOL  = X_WET_PAN + PAN_KNOB_W  + 8;   // 413
 
 // LFO rate knob: centred under the AMP knob in the pan row
 static constexpr int X_LFO_RATE = X_AMP + (MAIN_KNOB_W - GAIN_KNOB_W) / 2;   // 254
@@ -374,14 +362,9 @@ void EQPanel::resized()
 BADTEditor::BADTEditor(BADTAudioProcessor& p)
     : AudioProcessorEditor(&p),   // JUCE base class: pass processor pointer
       audioProcessor(p),          // Store our own reference to the processor
-      // ── VU meter members must be initialised here because VUMeterComponent
-      //    has no default constructor — it requires a std::atomic<float>& argument.
-      //    Writing them here is called "member initialiser list" syntax in C++.
-      //    The four atomic members live in the processor (written by audio thread).
-      inputVUL  (p.inputLevelL),
-      inputVUR  (p.inputLevelR),
-      outputVUL (p.outputLevelL),
-      outputVUR (p.outputLevelR)
+      // VUMeterComponent has no default constructor — the atomic<float>& must be
+      // passed here in the initialiser list.  We only have one VU now.
+      outputVUL (p.outputLevelL)
 {
     setSize(WINDOW_WIDTH, WINDOW_HEIGHT);
 
@@ -393,21 +376,22 @@ BADTEditor::BADTEditor(BADTAudioProcessor& p)
     // Tooltips appear when the user hovers the mouse over a knob for a moment.
     timeKnob     .setTooltip("Time modulation depth (Ts). "
                               "Controls how much the signal level shifts the delay time. "
-                              "Range: -1 to +1 (up to 20 ms delay).");
+                              "Range: -1 to +1 (up to 200 ms delay).");
     amplitudeKnob.setTooltip("Amplitude modulation depth. "
                               "Controls how much the signal level affects gain. "
                               "Max: +/-6 dB.");
     pitchKnob    .setTooltip("Pitch modulation depth. "
                               "Controls how much the signal level shifts the pitch. "
-                              "Max: +/-50 cents. SoundTouch is currently active.");
+                              "Max: +/-50 cents.");
 
-    // ── Gain knobs ────────────────────────────────────────────────────────────
-    // smallKnob=true: uses compact dimensions for the text box inside the knob.
-    setupKnob(inGainKnob,  inGainLabel,  "IN GAIN",  true);
-    setupKnob(outGainKnob, outGainLabel, "OUT GAIN", true);
+    // ── Volume faders ─────────────────────────────────────────────────────────
+    // smallKnob=true: uses compact text box dimensions.
+    // These sit next to their respective pan knobs in Row 2.
+    setupKnob(dryVolKnob, dryVolLabel, "DRY VOL", true);
+    setupKnob(wetVolKnob, wetVolLabel, "WET VOL", true);
 
-    inGainKnob .setTooltip("Input gain — applied before all processing. Range: -24 to +24 dB.");
-    outGainKnob.setTooltip("Output gain — applied after all processing. Range: -24 to +24 dB.");
+    dryVolKnob.setTooltip("Dry signal volume. Range: -24 to +6 dB.");
+    wetVolKnob.setTooltip("Wet signal volume. Range: -24 to +6 dB. Default -6 dB sits the effect under the dry.");
 
     // ── Pan knobs ─────────────────────────────────────────────────────────────
     //
@@ -510,13 +494,9 @@ BADTEditor::BADTEditor(BADTAudioProcessor& p)
     dryPanKnob.onDoubleClick = [this]() { showEQPanel(true);  };
     wetPanKnob.onDoubleClick = [this]() { showEQPanel(false); };
 
-    // ── VU meters ─────────────────────────────────────────────────────────────
-    // The VU objects are already constructed (in the initialiser list above).
-    // We just need to register them as visible child components.
-    addAndMakeVisible(inputVUL);
-    addAndMakeVisible(inputVUR);
+    // ── Single output VU meter ────────────────────────────────────────────────
+    // Constructed in the initialiser list. Just register it as a child component.
     addAndMakeVisible(outputVUL);
-    addAndMakeVisible(outputVUR);
 
     // ── SliderAttachments for the main controls ───────────────────────────────
     //
@@ -539,11 +519,11 @@ BADTEditor::BADTEditor(BADTAudioProcessor& p)
     pitchAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         audioProcessor.apvts, BADTAudioProcessor::PARAM_PITCH,    pitchKnob);
 
-    inGainAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        audioProcessor.apvts, BADTAudioProcessor::PARAM_IN_GAIN,  inGainKnob);
+    dryVolAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.apvts, BADTAudioProcessor::PARAM_DRY_VOL, dryVolKnob);
 
-    outGainAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        audioProcessor.apvts, BADTAudioProcessor::PARAM_OUT_GAIN, outGainKnob);
+    wetVolAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        audioProcessor.apvts, BADTAudioProcessor::PARAM_WET_VOL, wetVolKnob);
 
     dryPanAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         audioProcessor.apvts, BADTAudioProcessor::PARAM_DRY_PAN,  dryPanKnob);
@@ -554,30 +534,26 @@ BADTEditor::BADTEditor(BADTAudioProcessor& p)
     lfoRateAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         audioProcessor.apvts, BADTAudioProcessor::PARAM_LFO_RATE, lfoRateKnob);
 
-    // ── EQ panel overlays ─────────────────────────────────────────────────────
+    // ── EQ floating windows ───────────────────────────────────────────────────
     //
-    // std::make_unique<T>(...) allocates T on the heap and wraps it in a
-    // unique_ptr — the object is deleted automatically when the editor is destroyed.
+    // The EQ panels are NOT added as child components.  Instead, showEQPanel()
+    // calls addToDesktop() the first time they are opened, which makes each one
+    // a real operating-system window that floats in front of the plugin.
     //
-    // addChildComponent() vs addAndMakeVisible():
-    //   addAndMakeVisible()  — adds the child AND makes it visible immediately.
-    //   addChildComponent()  — adds the child but keeps it HIDDEN.
-    // EQ panels start hidden; showEQPanel() reveals the correct one on demand.
-    // The * operator dereferences unique_ptr<EQPanel> to get an EQPanel&.
+    // Until the user double-clicks a pan knob the panels exist in memory but
+    // are invisible and have no OS window peer.
     //
     dryEQPanel = std::make_unique<EQPanel>(
         audioProcessor,
-        true,                              // isDry = true
-        [this]() { hideEQPanels(); }       // onClose: hide everything when [X] clicked
+        true,                         // isDry = true
+        [this]() { hideEQPanels(); }  // onClose: called when user clicks [X]
     );
-    addChildComponent(*dryEQPanel);
 
     wetEQPanel = std::make_unique<EQPanel>(
         audioProcessor,
-        false,                             // isDry = false
+        false,                        // isDry = false
         [this]() { hideEQPanels(); }
     );
-    addChildComponent(*wetEQPanel);
 }
 
 
@@ -591,7 +567,13 @@ BADTEditor::BADTEditor(BADTAudioProcessor& p)
 //
 BADTEditor::~BADTEditor()
 {
-    stopTimer(); // prevent timerCallback from firing after destruction
+    stopTimer();
+
+    // Remove EQ panels from the desktop before the unique_ptrs destroy them.
+    // JUCE's Component destructor also does this, but being explicit avoids any
+    // ordering issue where the close callback fires during destruction.
+    if (dryEQPanel && dryEQPanel->isOnDesktop()) dryEQPanel->removeFromDesktop();
+    if (wetEQPanel && wetEQPanel->isOnDesktop()) wetEQPanel->removeFromDesktop();
 }
 
 
@@ -692,21 +674,8 @@ void BADTEditor::paint(juce::Graphics& g)
 //
 void BADTEditor::resized()
 {
-    // ── VU meters ─────────────────────────────────────────────────────────────
-    // Tall narrow bars that span the full height of the row-1 area
-    // (label strip + knob height + text-box height = VU_H).
-    inputVUL .setBounds(X_VU_IN_L,  ROW1_LABEL_Y, VU_W, VU_H);
-    inputVUR .setBounds(X_VU_IN_R,  ROW1_LABEL_Y, VU_W, VU_H);
-    outputVUL.setBounds(X_VU_OUT_L, ROW1_LABEL_Y, VU_W, VU_H);
-    outputVUR.setBounds(X_VU_OUT_R, ROW1_LABEL_Y, VU_W, VU_H);
-
-    // ── Gain knobs ────────────────────────────────────────────────────────────
-    // Labels at the same Y as all other row-1 labels.
-    // Knobs start at the same Y as main knobs (ROW1_KNOB_Y) — they're just shorter.
-    inGainLabel .setBounds(X_IN_GAIN,  ROW1_LABEL_Y, GAIN_KNOB_W, LABEL_H);
-    outGainLabel.setBounds(X_OUT_GAIN, ROW1_LABEL_Y, GAIN_KNOB_W, LABEL_H);
-    inGainKnob  .setBounds(X_IN_GAIN,  ROW1_KNOB_Y,  GAIN_KNOB_W, GAIN_KNOB_H);
-    outGainKnob .setBounds(X_OUT_GAIN, ROW1_KNOB_Y,  GAIN_KNOB_W, GAIN_KNOB_H);
+    // ── Single output VU meter (right side of main row) ───────────────────────
+    outputVUL.setBounds(X_VU_OUT, ROW1_LABEL_Y, VU_W, VU_H);
 
     // ── Main modulation knobs ─────────────────────────────────────────────────
     timeLabel     .setBounds(X_TIME,  ROW1_LABEL_Y, MAIN_KNOB_W, LABEL_H);
@@ -722,37 +691,35 @@ void BADTEditor::resized()
     bypassAmpButton  .setBounds(X_AMP,   BYP_Y, BYP_W, BYP_H);
     bypassPitchButton.setBounds(X_PITCH, BYP_Y, BYP_W, BYP_H);
 
+    // ── Volume faders — outside their respective pan knobs ───────────────────
+    dryVolLabel.setBounds(X_DRY_VOL, ROW2_LABEL_Y, GAIN_KNOB_W, LABEL_H);
+    wetVolLabel.setBounds(X_WET_VOL, ROW2_LABEL_Y, GAIN_KNOB_W, LABEL_H);
+    dryVolKnob .setBounds(X_DRY_VOL, ROW2_KNOB_Y,  GAIN_KNOB_W, GAIN_KNOB_H);
+    wetVolKnob .setBounds(X_WET_VOL, ROW2_KNOB_Y,  GAIN_KNOB_W, GAIN_KNOB_H);
+
     // ── Pan knobs ─────────────────────────────────────────────────────────────
-    // DRY PAN sits horizontally centred under the TIME knob.
-    // WET PAN sits horizontally centred under the PITCH knob.
+    // DRY PAN centred under TIME knob; WET PAN centred under PITCH knob.
     dryPanLabel.setBounds(X_DRY_PAN, ROW2_LABEL_Y, PAN_KNOB_W, LABEL_H);
     wetPanLabel.setBounds(X_WET_PAN, ROW2_LABEL_Y, PAN_KNOB_W, LABEL_H);
     dryPanKnob .setBounds(X_DRY_PAN, ROW2_KNOB_Y,  PAN_KNOB_W, PAN_KNOB_H);
     wetPanKnob .setBounds(X_WET_PAN, ROW2_KNOB_Y,  PAN_KNOB_W, PAN_KNOB_H);
 
-    // ── LFO rate knob — centred under AMP in the pan row ────────────────────
+    // ── LFO rate knob — centred under AMP in the pan row ─────────────────────
     lfoRateLabel.setBounds(X_LFO_RATE, ROW2_LABEL_Y, GAIN_KNOB_W, LABEL_H);
     lfoRateKnob .setBounds(X_LFO_RATE, ROW2_KNOB_Y,  GAIN_KNOB_W, GAIN_KNOB_H);
 
     // ── Solo buttons — beneath their respective pan knobs ────────────────────
-    // X aligns with the pan knob above; Y is just below the pan knob.
     soloDryButton.setBounds(X_DRY_PAN, SOLO_Y, SOLO_W, SOLO_H);
     soloWetButton.setBounds(X_WET_PAN, SOLO_Y, SOLO_W, SOLO_H);
 
-    // ── Sensor mode toggle + readout (in the title bar, right-aligned) ────────
-    // Layout: [SENSOR] [AMP/PITCH toggle] [0.000 readout]
-    //         x=340     x=402              x=454
+    // ── Sensor mode toggle + readout ─────────────────────────────────────────
+    // Positioned in the title bar area, right-aligned.
     sensorModeLabel .setBounds(340, 8, 58, 16);
     sensorModeButton.setBounds(402, 6, 48, 20);
     sensorValueLabel.setBounds(454, 8, 96, 16);
 
-    // ── EQ panel overlays ─────────────────────────────────────────────────────
-    // When visible, each EQ panel covers the entire plugin window.
-    // setBounds(0, 0, getWidth(), getHeight()) fills the window exactly.
-    // The null checks guard against the rare case where resized() is called
-    // before the constructor has created the panels (shouldn't happen, but safe).
-    if (dryEQPanel) dryEQPanel->setBounds(0, 0, getWidth(), getHeight());
-    if (wetEQPanel) wetEQPanel->setBounds(0, 0, getWidth(), getHeight());
+    // EQ panels are floating OS windows — they are NOT child components, so no
+    // setBounds() call here.  They are sized and positioned in showEQPanel().
 }
 
 
@@ -780,38 +747,59 @@ void BADTEditor::timerCallback()
 
 
 // =============================================================================
-// showEQPanel() — reveal one EQ panel and hide the other
+// showEQPanel() — open one EQ panel as a floating OS window
 // =============================================================================
 //
 // Called by dryPanKnob.onDoubleClick (showDry=true)
 // and wetPanKnob.onDoubleClick (showDry=false).
 //
-// Only one EQ panel is ever visible at a time. We hide the opposite panel
-// first, then show and bring the requested one to the front.
+// The first time a panel is shown we call addToDesktop(), which asks the OS
+// to create a real native window for it.  addToDesktop() is a no-op on
+// subsequent calls (JUCE skips it when a peer already exists), so we can
+// safely call it every time.
+//
+// The window is positioned directly below the plugin window.  The EQ panel
+// is NOT a child component of the editor — it is its own OS-level window.
 //
 void BADTEditor::showEQPanel(bool showDry)
 {
-    if (showDry)
+    EQPanel* toShow = showDry ? dryEQPanel.get() : wetEQPanel.get();
+    EQPanel* toHide = showDry ? wetEQPanel.get() : dryEQPanel.get();
+
+    if (!toShow) return;
+
+    // Hide the other panel if it is currently open.
+    if (toHide) toHide->setVisible(false);
+
+    if (!toShow->isOnDesktop())
     {
-        if (wetEQPanel) wetEQPanel->setVisible(false);
-        if (dryEQPanel)
-        {
-            dryEQPanel->setVisible(true);
-            // toFront(shouldGrabKeyboardFocus):
-            // Brings this child in front of all its siblings.
-            // false = don't steal keyboard focus from the DAW host.
-            dryEQPanel->toFront(false);
-        }
+        // windowIsTemporary: the OS does not show the window in the taskbar.
+        // windowHasDropShadow: adds a shadow (ignored on some hosts/platforms).
+        //
+        // Passing getPeer()->getNativeHandle() makes this window a child of
+        // the plugin window at the OS level — it follows the plugin if the DAW
+        // moves its host window and stays on top of it.
+        void* nativeParent = (getPeer() != nullptr)
+                             ? getPeer()->getNativeHandle()
+                             : nullptr;
+
+        toShow->addToDesktop(
+            juce::ComponentPeer::windowIsTemporary
+            | juce::ComponentPeer::windowHasDropShadow,
+            nativeParent
+        );
+
+        // Size the EQ window: same width as the plugin, ~200px tall.
+        toShow->setSize(WINDOW_WIDTH, 200);
+
+        // Place it directly below the plugin window.
+        // getScreenBounds() gives this component's rectangle in screen pixels.
+        auto pluginScreen = getScreenBounds();
+        toShow->setTopLeftPosition(pluginScreen.getX(), pluginScreen.getBottom());
     }
-    else
-    {
-        if (dryEQPanel) dryEQPanel->setVisible(false);
-        if (wetEQPanel)
-        {
-            wetEQPanel->setVisible(true);
-            wetEQPanel->toFront(false);
-        }
-    }
+
+    toShow->setVisible(true);
+    toShow->toFront(false);
 }
 
 
