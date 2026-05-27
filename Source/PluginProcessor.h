@@ -8,15 +8,15 @@
 #include <cmath>
 #include <algorithm>
 
-#include <rubberband/RubberBandLiveShifter.h>
+#include <rubberband/RubberBandLiveShifter.h>  // Rubber Band Library (Breakfastquay)
 
 
 // =============================================================================
-// CLASS: CircularBuffer
+// CircularBuffer
 // =============================================================================
-// Fixed-size ring buffer for audio delay and analysis.
-// Write advances a pointer; read looks N positions back with optional
-// fractional-sample linear interpolation.
+// Fixed-size ring buffer. Write advances a pointer; read looks N positions back.
+// readDelayedInterpolated() uses linear interpolation to prevent zipper noise
+// when the delay position is modulated.
 class CircularBuffer
 {
 public:
@@ -40,8 +40,6 @@ public:
         return buffer[readIndex];
     }
 
-    // Linear interpolation between two adjacent integer delay positions.
-    // Prevents zipper noise when delay time is modulated.
     float readDelayedInterpolated(float delaySamples) const
     {
         delaySamples = juce::jlimit(0.0f, static_cast<float>(bufferSize - 2), delaySamples);
@@ -75,12 +73,12 @@ private:
 
 
 // =============================================================================
-// CLASS: SignalAnalyzer
+// SignalAnalyzer
 // =============================================================================
 // Two sensor modes:
-//   computeSampleSum()  — mean absolute amplitude, returns 0..1 directly.
-//   analyzePitch()      — autocorrelation fundamental estimate, returns Hz
-//                         (caller normalises to 0..1 using known min/max).
+//   computeSampleSum() — mean absolute amplitude  →  0..1
+//   analyzePitch()     — YIN pitch estimate  →  Hz
+//                        (normalise to 0..1 via PITCH_NORM_MIN/MAX_HZ constants)
 class SignalAnalyzer
 {
 public:
@@ -92,41 +90,33 @@ public:
         yinBuf.assign(static_cast<size_t>(newAnalysisSamples / 2 + 1), 0.0f);
     }
 
-    // AMPLITUDE SENSOR: mean absolute amplitude of the last analysisSamples.
     float computeSampleSum(const CircularBuffer& buf) const
     {
         return buf.getAverageAmplitude(analysisSamples);
     }
 
-    // FREQUENCY SENSOR (YIN algorithm): returns an estimated fundamental in Hz.
-    // Returns 0 if the signal is too quiet or no clear pitch is found.
-    //
-    // YIN (de Cheveigné & Kawahara 2002) computes a cumulative mean-normalised
-    // difference function (CMNDF) and finds the first lag where it dips below a
-    // threshold (0.15), then refines the estimate with parabolic interpolation.
-    // It reliably tracks the fundamental even on complex polyphonic audio where
-    // ZCR and plain autocorrelation give spurious readings.
-    //
-    // HOW TO CALIBRATE PITCH_NORM_MIN/MAX_HZ:
-    //   Switch GUI to PITCH mode, play your audio, note min/max Hz in the readout.
-    //   Update those constants in PluginProcessor.cpp.
+    // YIN algorithm (de Cheveigné & Kawahara, 2002).
+    // Computes the CMNDF and locates the first lag below a 0.15 threshold,
+    // then refines with parabolic interpolation. More robust than ZCR or plain
+    // autocorrelation on polyphonic or complex material.
+    // Returns 0 Hz on silence or when no clear fundamental is detected.
+    // Calibrate PITCH_NORM_MIN/MAX_HZ in PluginProcessor.cpp to match your source.
     float analyzePitch(const CircularBuffer& buf) const
     {
-        const int N       = analysisSamples;
-        const int maxLag  = N / 2;
+        const int N      = analysisSamples;
+        const int maxLag = N / 2;
 
-        // Copy last N samples into work buffer, oldest first.
         for (int i = 0; i < N; ++i)
             pitchWorkBuf[i] = buf.readDelayed(N - 1 - i);
 
-        // Energy gate: bail on silence / noise floor.
+        // Energy gate — bail on silence / noise floor
         float energy = 0.0f;
         for (int i = 0; i < N; ++i)
             energy += pitchWorkBuf[i] * pitchWorkBuf[i];
         energy /= static_cast<float>(N);
         if (energy < 1e-4f) return 0.0f;
 
-        // Difference function: d(tau) = sum_{j=0}^{maxLag-1} (x[j] - x[j+tau])^2
+        // Difference function
         yinBuf[0] = 1.0f;
         for (int tau = 1; tau < maxLag; ++tau)
         {
@@ -139,8 +129,7 @@ public:
             yinBuf[tau] = sum;
         }
 
-        // Cumulative mean normalised difference function (CMNDF) — in-place.
-        // yinBuf[tau] = d(tau) * tau / sum_{j=1}^{tau} d(j)
+        // CMNDF (in-place)
         float cumSum = 0.0f;
         for (int tau = 1; tau < maxLag; ++tau)
         {
@@ -150,7 +139,7 @@ public:
                 : 1.0f;
         }
 
-        // Threshold search: first tau where CMNDF dips below 0.15 and is a local min.
+        // Threshold search + parabolic refinement
         const float threshold = 0.15f;
         int tauEstimate = -1;
         for (int tau = 2; tau < maxLag; ++tau)
@@ -165,9 +154,8 @@ public:
         }
         if (tauEstimate < 0) return 0.0f;
 
-        // Parabolic interpolation for sub-sample period accuracy.
-        const int x0 = (tauEstimate > 1)           ? tauEstimate - 1 : tauEstimate;
-        const int x2 = (tauEstimate + 1 < maxLag)  ? tauEstimate + 1 : tauEstimate;
+        const int x0 = (tauEstimate > 1)          ? tauEstimate - 1 : tauEstimate;
+        const int x2 = (tauEstimate + 1 < maxLag) ? tauEstimate + 1 : tauEstimate;
         float betterTau;
         if (x0 == tauEstimate)
             betterTau = (yinBuf[tauEstimate] <= yinBuf[x2])
@@ -189,88 +177,42 @@ public:
 private:
     double sampleRate      = 44100.0;
     int    analysisSamples = 882;
-    mutable std::vector<float> pitchWorkBuf; // N samples: input copy for analysis
-    mutable std::vector<float> yinBuf;       // N/2 samples: CMNDF scratch space
+    mutable std::vector<float> pitchWorkBuf;
+    mutable std::vector<float> yinBuf;
 };
 
 
 // =============================================================================
-// CLASS: PitchProcessor  (RubberBandLiveShifter wrapper)
+// PitchProcessor  —  Rubber Band Library (Breakfastquay) wrapper
 // =============================================================================
+// Uses RubberBandLiveShifter for pitch-only shifting (no time stretch).
+// OptionWindowShort gives ~50ms latency; quality is fine for the ±50 cent range.
 //
-// What this does:
-//   Wraps RubberBandLiveShifter to provide simple in-place pitch shifting on a
-//   mono float buffer. You call setPitchCents() once per block, then processBlock()
-//   to apply the shift.
-//
-// Why RubberBandLiveShifter?
-//   The Rubber Band Library's LiveShifter is designed specifically for pitch-only
-//   shifting in real time — it does NOT change playback speed (time stretching).
-//   It handles polyphonic and complex audio sources far better than SoundTouch
-//   because it uses a high-quality phase-vocoder algorithm with a smarter
-//   transient-handling system.
-//
-// The block-size bridging problem:
-//   RubberBandLiveShifter requires EXACTLY getBlockSize() samples per shift()
-//   call. However, the DAW may deliver any block size (64, 128, 512, 2048 …).
-//   We bridge the gap with two FIFO queues:
-//     inputFifo  — accumulates incoming host samples until we have a full RB block
-//     outputFifo — holds processed samples until the host asks for them
-//
-// Real-time safety:
-//   All memory is pre-allocated in prepare(). After that, no allocation happens
-//   inside processBlock() — essential to prevent audio glitches on the audio thread.
-//   We use std::vector with reserve() so insert() never triggers reallocation.
-//
+// Block-size bridging: RubberBand requires exactly rbBlockSize samples per
+// shift() call, but the DAW delivers variable-size blocks. Two FIFOs bridge
+// the gap — inputFifo accumulates host samples, outputFifo holds processed
+// samples. All memory is pre-allocated in prepare(); no audio-thread allocation
+// after that point.
 class PitchProcessor
 {
 public:
     PitchProcessor()  = default;
     ~PitchProcessor() = default;
 
-    // -------------------------------------------------------------------------
-    // prepare()  —  called before playback starts (or when sample rate changes)
-    // -------------------------------------------------------------------------
+    // Recreates the shifter for the current sample rate and pre-allocates FIFOs.
+    // Must be called before processBlock().
     void prepare(double newSampleRate, int maxHostBlockSize)
     {
-        // Create a new LiveShifter for this sample rate.
-        //
-        // RubberBandLiveShifter(sampleRate, channels, options):
-        //   sampleRate — audio sample rate in Hz (e.g. 44100, 48000)
-        //   channels   — 1 because BADT sums to mono before pitch shifting
-        //   options    — OptionWindowShort: smaller FFT window = ~50ms latency
-        //                (vs ~100ms for OptionWindowMedium).
-        //                Quality is excellent for the ±50 cent range used here.
-        //
-        // std::make_unique<T>(...) is the C++14 way to create a heap object and
-        // store it in a smart pointer. When this PitchProcessor is destroyed,
-        // the shifter is automatically deleted — no manual delete needed.
         shifter = std::make_unique<RubberBand::RubberBandLiveShifter>(
             static_cast<size_t>(newSampleRate),
             1,
             RubberBand::RubberBandLiveShifter::OptionWindowShort
         );
 
-        // Query the block size RubberBand requires for every shift() call.
-        // This is fixed for the lifetime of this shifter (determined by the
-        // FFT window size and sample rate). Typically 256 at 44100 Hz.
         rbBlockSize = static_cast<int>(shifter->getBlockSize());
-
-        // Allocate a scratch buffer for one block of RubberBand output.
-        // assign(n, 0.0f) fills a vector with n zeros.
         rbOutputBlock.assign(static_cast<size_t>(rbBlockSize), 0.0f);
 
-        // Pre-allocate both FIFOs so no allocation can happen on the audio thread.
-        //
-        // How much to reserve:
-        //   In steady state, inputFifo holds at most (rbBlockSize - 1) leftover
-        //   samples from the last block. The new host block adds maxHostBlockSize.
-        //   So the peak size is (rbBlockSize - 1) + maxHostBlockSize.
-        //   We add rbBlockSize * 2 extra for safety, plus a 128-sample margin.
-        //
-        // reserve() sets aside memory without changing the vector's logical size.
-        // After this, insert(end(), ...) will not trigger any reallocation as long
-        // as we stay within the reserved capacity — which we always do here.
+        // Reserve for one steady-state host block plus a full RB block of headroom.
         const int reserveSize = maxHostBlockSize + rbBlockSize * 2 + 128;
         inputFifo.reserve(static_cast<size_t>(reserveSize));
         outputFifo.reserve(static_cast<size_t>(reserveSize));
@@ -280,147 +222,72 @@ public:
         currentCents = 0.0f;
     }
 
-    // -------------------------------------------------------------------------
-    // reset()  —  flush internal state when playback stops
-    // -------------------------------------------------------------------------
+    // RubberBand's fixed start-delay (typically ~6ms at 44100 Hz).
+    // Report this to the DAW via setLatencySamples() and delay the dry path
+    // by the same amount so wet and dry stay in sync.
+    int getLatencySamples() const
+    {
+        if (!shifter) return 0;
+        return static_cast<int>(shifter->getStartDelay());
+    }
+
     void reset()
     {
-        // RubberBand's reset() clears its internal FFT overlap-add state and
-        // delay lines so stale audio from a previous session doesn't bleed in.
         if (shifter) shifter->reset();
-
-        // Empty both FIFOs so no old samples queue up into the next session.
         inputFifo.clear();
         outputFifo.clear();
     }
 
-    // -------------------------------------------------------------------------
-    // setPitchCents()  —  set the pitch shift amount
-    // -------------------------------------------------------------------------
-    // Call this once per block before processBlock().
-    // cents: positive = shift up, negative = shift down.
-    //        100 cents = 1 semitone.  0 cents = no shift.
+    // Converts cents → frequency ratio (2^(cents/1200)) and passes to RubberBand.
+    // Call once per block before processBlock().
     void setPitchCents(float cents)
     {
         currentCents = cents;
         if (!shifter) return;
-
-        // Convert cents to a linear frequency ratio for RubberBand.
-        //
-        // RubberBand uses ratios:
-        //   1.0 = unison (no change)
-        //   2.0 = one octave up   (frequency × 2)
-        //   0.5 = one octave down (frequency ÷ 2)
-        //
-        // Formula: ratio = 2 ^ (cents / 1200)
-        //   Why 1200? — 1 octave = 12 semitones × 100 cents/semitone = 1200 cents.
-        //   So 2^(1200/1200) = 2^1 = 2.0 (octave up). Checks out. ✓
-        //
-        // Examples:
-        //   +100 cents → 2^(100/1200) ≈ 1.0595  (one semitone up)
-        //    +50 cents → 2^(50/1200)  ≈ 1.0293  (quarter-tone up)
-        //      0 cents → 2^0           = 1.0000  (no change)
-        //    -50 cents → 2^(-50/1200) ≈ 0.9716  (quarter-tone down)
         const double ratio = std::pow(2.0, static_cast<double>(cents) / 1200.0);
         shifter->setPitchScale(ratio);
     }
 
-    // -------------------------------------------------------------------------
-    // processBlock()  —  apply pitch shift in-place
-    // -------------------------------------------------------------------------
-    // Reads from samples[], writes the pitch-shifted result back to samples[].
-    // numSamples can be any size — we bridge to RubberBand's fixed block size.
+    // In-place pitch shift. Handles FIFO bridging transparently.
+    // Outputs silence for the first block or two while the pipeline warms up.
     void processBlock(float* samples, int numSamples)
     {
         if (!shifter) return;
 
-        // ---- STEP 1: Push incoming host samples into the input FIFO ----
-        //
-        // insert(end(), ptr, ptr+n) appends n elements from a raw array.
-        // Because we called reserve() in prepare(), this never allocates.
         inputFifo.insert(inputFifo.end(), samples, samples + numSamples);
 
-        // ---- STEP 2: Drain the input FIFO in fixed RubberBand blocks ----
-        //
-        // RubberBand's shift() must receive EXACTLY rbBlockSize samples every time.
-        // We loop as long as there are enough samples waiting in the FIFO.
         while (static_cast<int>(inputFifo.size()) >= rbBlockSize)
         {
-            // shift() takes arrays of channel pointers — one pointer per channel.
-            // We have 1 channel (mono), so each array has just one element.
-            // inputFifo.data() always points to the FIRST (oldest) sample in the
-            // vector, which is the correct "front of queue" position.
             const float* inPtrs[1]  = { inputFifo.data() };
             float*       outPtrs[1] = { rbOutputBlock.data() };
-
-            // This is the core pitch-shifting call.
-            // Reads exactly rbBlockSize samples from inPtrs[0].
-            // Writes exactly rbBlockSize pitch-shifted samples to outPtrs[0].
             shifter->shift(inPtrs, outPtrs);
-
-            // Remove the consumed samples from the front of the input FIFO.
-            // erase(begin, begin+n) shifts all later elements leftward — O(n) copy,
-            // but n is at most rbBlockSize (typically 256) so this is very fast.
-            inputFifo.erase(inputFifo.begin(),
-                            inputFifo.begin() + rbBlockSize);
-
-            // Append the processed output block to the output FIFO.
-            outputFifo.insert(outputFifo.end(),
-                              rbOutputBlock.begin(),
-                              rbOutputBlock.end());
+            inputFifo.erase(inputFifo.begin(), inputFifo.begin() + rbBlockSize);
+            outputFifo.insert(outputFifo.end(), rbOutputBlock.begin(), rbOutputBlock.end());
         }
 
-        // ---- STEP 3: Pull numSamples from the output FIFO into samples[] ----
-        //
-        // In steady state the output FIFO always has enough samples after step 2.
-        // The only exception is the very first block after prepare() — before
-        // RubberBand has produced any output yet ("pipeline warm-up" latency).
         if (static_cast<int>(outputFifo.size()) >= numSamples)
         {
-            // Copy the front numSamples from the FIFO back to the caller's buffer.
-            // std::copy works on any iterator range; for vector it's essentially memcpy.
-            std::copy(outputFifo.begin(),
-                      outputFifo.begin() + numSamples,
-                      samples);
-
-            // Remove those samples from the front of the output FIFO.
-            outputFifo.erase(outputFifo.begin(),
-                             outputFifo.begin() + numSamples);
+            std::copy(outputFifo.begin(), outputFifo.begin() + numSamples, samples);
+            outputFifo.erase(outputFifo.begin(), outputFifo.begin() + numSamples);
         }
         else
         {
-            // Pipeline not yet full — output silence this block.
-            // This only happens for the first block or two after prepare().
-            // On the wet path this brief silence is hidden by the delay buffer.
             std::fill(samples, samples + numSamples, 0.0f);
         }
     }
 
 private:
-    // The RubberBand LiveShifter object.
-    // unique_ptr manages its lifetime — automatically deleted when we are.
     std::unique_ptr<RubberBand::RubberBandLiveShifter> shifter;
-
-    // The fixed block size that shift() requires per call.
-    // Queried after construction; does not change until prepare() is called again.
-    int rbBlockSize = 512;
-
-    // One block of output scratch space, reused every RubberBand pass.
+    int                rbBlockSize = 512;
     std::vector<float> rbOutputBlock;
-
-    // Input FIFO: accumulates host audio until we have a full RubberBand block.
-    // Output FIFO: holds processed audio until the host reads it.
-    // Both are pre-allocated in prepare() — no audio-thread allocation occurs.
     std::vector<float> inputFifo;
     std::vector<float> outputFifo;
-
-    // The most recently set shift amount in cents (kept for reference).
-    float currentCents = 0.0f;
+    float              currentCents = 0.0f;
 };
 
 
 // =============================================================================
-// CLASS: BADTAudioProcessor
+// BADTAudioProcessor
 // =============================================================================
 class BADTAudioProcessor : public juce::AudioProcessor
 {
@@ -440,7 +307,7 @@ public:
     bool acceptsMidi()  const override { return false; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.02; }
+    double getTailLengthSeconds() const override { return 0.035; }
 
     int  getNumPrograms()    override { return 1; }
     int  getCurrentProgram() override { return 0; }
@@ -454,19 +321,15 @@ public:
     // ---- APVTS parameter IDs ----
     juce::AudioProcessorValueTreeState apvts;
 
-    static constexpr const char* PARAM_TIME  = "TIME_CTRL";
-    static constexpr const char* PARAM_AMP   = "AMP_CTRL";
-    static constexpr const char* PARAM_PITCH = "PITCH_CTRL";
+    static constexpr const char* PARAM_TIME     = "TIME_CTRL";
+    static constexpr const char* PARAM_AMP      = "AMP_CTRL";
+    static constexpr const char* PARAM_PITCH    = "PITCH_CTRL";
     static constexpr const char* PARAM_IN_GAIN  = "IN_GAIN";
     static constexpr const char* PARAM_OUT_GAIN = "OUT_GAIN";
-    static constexpr const char* PARAM_DRY_PAN = "DRY_PAN";
-    static constexpr const char* PARAM_WET_PAN = "WET_PAN";
-
-    // Per-path volume faders (-24 to +6 dB).
-    // DRY_VOL scales the unprocessed signal before it reaches the mix output.
-    // WET_VOL replaces the old hard-coded -6 dB wet offset — now user-adjustable.
-    static constexpr const char* PARAM_DRY_VOL = "DRY_VOL";
-    static constexpr const char* PARAM_WET_VOL = "WET_VOL";
+    static constexpr const char* PARAM_DRY_PAN  = "DRY_PAN";
+    static constexpr const char* PARAM_WET_PAN  = "WET_PAN";
+    static constexpr const char* PARAM_DRY_VOL  = "DRY_VOL";
+    static constexpr const char* PARAM_WET_VOL  = "WET_VOL";
 
     static constexpr const char* PARAM_D_EQ1_FREQ = "D_EQ1_FREQ";
     static constexpr const char* PARAM_D_EQ1_Q    = "D_EQ1_Q";
@@ -488,87 +351,95 @@ public:
     static constexpr const char* PARAM_W_EQ3_Q    = "W_EQ3_Q";
     static constexpr const char* PARAM_W_EQ3_GAIN = "W_EQ3_GAIN";
 
-    static constexpr const char* PARAM_LFO_RATE = "LFO_RATE";
+    static constexpr const char* PARAM_LFO_RATE  = "LFO_RATE";
+    static constexpr const char* PARAM_LFO_DEPTH = "LFO_DEPTH";
 
-    // ---- VU level (written by audio thread, read by GUI) ----
-    // Single output level: peak of max(|left|, |right|) across the block.
+    // ---- VU levels (written by audio thread, read by GUI timer) ----
     std::atomic<float> outputLevelL { 0.0f };
+    std::atomic<float> outputLevelR { 0.0f };
 
-    // ---- Solo path flags (written by GUI, read by audio thread) ----
-    // soloDry = suppress wet path (hear dry only)
-    // soloWet = suppress dry path (hear wet only)
-    // If both are active simultaneously, both paths play (cancels out).
-    std::atomic<bool> soloDry { false };
-    std::atomic<bool> soloWet { false };
+    // ---- Per-block effect values for debug display ----
+    std::atomic<float> displayDelayMs    { 0.0f };
+    std::atomic<float> displayAmpDB      { 0.0f };
+    std::atomic<float> displayPitchCents { 0.0f };
 
-    // ---- Sensor mode flag (written by GUI, read by audio thread) ----
-    // false = amplitude mode (default)
-    // true  = pitch mode
-    std::atomic<bool> usePitchSensor { false };
+    // ---- GUI → audio thread flags (all atomic for lock-free access) ----
 
-    // ---- Raw sensor value for GUI display (written by audio thread) ----
-    // Amplitude mode: stores sampleSum (0..1)
-    // Pitch mode:     stores raw Hz before normalisation
-    std::atomic<float> rawSensorValue { 0.0f };
+    std::atomic<bool> soloDry { false };  // suppress wet path
+    std::atomic<bool> soloWet { false };  // suppress dry path
 
-    // ---- Bypass flags (written by GUI, read by audio thread) ----
-    // When true, the corresponding effect is skipped — wet signal is not delayed,
-    // amplitude-modulated, or pitch-shifted respectively.
+    // Per-stage A/P source: false = amplitude sensor, true = pitch sensor.
+    std::atomic<bool> timeUsePitch  { false };
+    std::atomic<bool> ampUsePitch   { false };
+    std::atomic<bool> pitchUsePitch { false };
+
+    // Per-stage bypass: skips the effect entirely (unity/zero output).
     std::atomic<bool> bypassTime  { false };
     std::atomic<bool> bypassAmp   { false };
     std::atomic<bool> bypassPitch { false };
 
+    // Per-stage invert: maps sampleSum → (1 − sampleSum), so the effect is
+    // strongest during silence and fades as amplitude rises.
+    std::atomic<bool> invertTime  { false };
+    std::atomic<bool> invertAmp   { false };
+    std::atomic<bool> invertPitch { false };
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
-    CircularBuffer  delayBuffer;
-    SignalAnalyzer  analyzer;
-    PitchProcessor  pitchProcessor;
+    CircularBuffer delayBuffer;
+    SignalAnalyzer analyzer;
+    PitchProcessor pitchProcessor;
 
-    // Dual-head crossfader for the amplitude-driven delay.
-    //
-    // When the target delay changes, we DON'T ramp the read position (that causes
-    // pitch shift). Instead we snap instantly to the new position (head A) and
-    // crossfade the audio from the old position (head B) over a short window.
-    // Both heads read at a constant sample offset during the crossfade, so neither
-    // produces any pitch artifact — only the blend changes.
-    float delayHeadA         = 0.0f;  // current (target) read position in samples
-    float delayHeadB         = 0.0f;  // previous read position, fading out
-    int   xfadeSamplesLeft   = 0;     // countdown: samples remaining in crossfade
-    int   xfadeLengthSamples = 441;   // total crossfade length (recomputed in prepare())
+    // Per-sample chase read head (technique from Chris Johnson's Airwindows ADT).
+    // Never snaps to a new position — always glides, producing a smooth pitch sweep.
+    float delayReadPos = 0.0f;
 
-    float lfoPhase = 0.0f; // LFO phase accumulator 0..1
+    float lfoPhase = 0.0f;
 
     juce::dsp::IIR::Filter<float> dryEqBand1, dryEqBand2, dryEqBand3;
     juce::dsp::IIR::Filter<float> wetEqBand1, wetEqBand2, wetEqBand3;
-    float prevDryEqParams[9] { 0.0f };
+    float prevDryEqParams[9] { 0.0f };  // cached param values for change detection
     float prevWetEqParams[9] { 0.0f };
 
-    // Brickwall limiter on the wet channel — always active, prevents runaway
-    // amplitude modulation from clipping the output.
-    juce::dsp::Limiter<float> wetLimiter;
+    juce::dsp::Limiter<float> wetLimiter;  // safety brickwall on wet output
 
-    double currentSampleRate = 44100.0;
-    int    currentBlockSize  = 512;
-    int    maxDelaySamples   = 882;
-    int    analysisSamples   = 882;
-    float  sampleSum         = 0.0f;
+    double currentSampleRate   = 44100.0;
+    int    currentBlockSize    = 512;
+    int    maxDelaySamples     = 882;   // 35ms at 44100 Hz
+    int    analysisSamples     = 882;   // 20ms analysis window
+    int    pitchLatencySamples = 0;     // RubberBand start delay (reported to DAW)
 
-    // EMA state for sensor smoothing (audio thread only — no atomics needed).
-    float smoothedAmplitude = 0.0f; // Smoothed 0..1 amplitude value
-    float smoothedPitchHz   = 0.0f; // Smoothed Hz value (held on silence)
-    float sensorSmoothAlpha = 0.1f; // EMA coefficient — recomputed in prepareToPlay()
+    // Amplitude sensor — plain symmetric EMA, shared by all three channels.
+    float smoothedAmplitude = 0.0f;
+
+    // Pitch sensor EMA.
+    float smoothedPitchHz   = 0.0f;
+    float sensorSmoothAlpha = 0.1f;  // recomputed in prepareToPlay (25ms tau)
+
+    // TIME channel: slow smoother on effectiveTimeSS.
+    // The delay head drifts gradually rather than reacting to every transient.
+    float smoothedTimeSS = 0.0f;
+    float timeChanAlpha  = 0.0f;     // recomputed in prepareToPlay (200ms tau)
+
+    // AMP channel: asymmetric attack/release on effectiveAmpSS.
+    // Fast attack (20ms) catches transients; slow release (400ms) creates a gain tail.
+    float smoothedAmpSS       = 0.0f;
+    float ampChanAttackAlpha  = 0.0f;  // recomputed in prepareToPlay
+    float ampChanReleaseAlpha = 0.0f;
+
+    // Block-level EMA pre-smoother for the delay target (runs before per-sample chase).
+    double delaySmoothAlpha    = 0.0;   // recomputed in prepareToPlay (15ms tau)
+    float  smoothedDelayTarget = 0.0f;
 
     std::vector<float> dryWorkBuffer;
     std::vector<float> wetWorkBuffer;
 
     float sumToMono(const juce::AudioBuffer<float>& buf, int sampleIndex) const;
-    float computeTargetDelaySamples(float ts) const;
-    float computeAmplitudeGain(float ampControl) const;
+    float computeTargetDelaySamples(float ts, float sampleSum) const;
+    float computeAmplitudeGain(float ampControl, float sampleSum) const;
     void  computePanGains(float panPosition, float& leftGain, float& rightGain) const;
     void  updateEQIfNeeded(bool isDry);
-
-    // Normalise a raw pitch Hz reading to 0..1 using calibration constants.
     float normalizePitch(float hz) const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(BADTAudioProcessor)

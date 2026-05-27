@@ -50,6 +50,13 @@ add_subdirectory(${JUCE_PATH} "${CMAKE_CURRENT_BINARY_DIR}/JUCE")
 set(RUBBERBAND_PATH "ThirdParty/rubberband-4.0.0")
 
 # =============================================================================
+# BINARY DATA (embedded fonts, images, etc.)
+# =============================================================================
+juce_add_binary_data(BADT_BinaryData
+    SOURCES ThirdParty/fonts/digital-7.ttf
+)
+
+# =============================================================================
 # PLUGIN DEFINITION
 # =============================================================================
 #
@@ -75,10 +82,13 @@ juce_add_plugin(BADT
     PLUGIN_CODE Bdtv
 
     # The plugin formats to build.
-    # VST3   = the modern standard, works in almost every DAW on Windows/Mac/Linux
-    # Standalone = a standalone app version (useful for testing without a DAW)
-    # We skip AU (Mac only) and AAX (Pro Tools, requires special SDK)
-    FORMATS VST3 Standalone
+    # VST3 — the modern standard, works in almost every DAW on Windows/Mac/Linux.
+    # AU   — Audio Unit, macOS/iOS only.  JUCE skips this silently on Windows/Linux
+    #        so listing it here is safe cross-platform: it will be built automatically
+    #        when you configure on a Mac, with no code changes needed.
+    # AAX  — Pro Tools (requires a separate Avid AAX SDK + signing — omitted for now).
+    # Standalone was removed: it adds build time and we don't need a standalone app.
+    FORMATS VST3 AU
 
     # This plugin processes audio (it is NOT a synthesizer/instrument)
     IS_SYNTH FALSE
@@ -184,6 +194,8 @@ target_compile_definitions(BADT
 
 target_link_libraries(BADT
     PRIVATE
+        BADT_BinaryData
+
         # juce_audio_utils: AudioProcessor, AudioProcessorEditor, APVTS, etc.
         # This pulls in juce_core, juce_events, juce_audio_basics, etc. automatically.
         juce::juce_audio_utils
