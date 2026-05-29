@@ -177,7 +177,7 @@ public:
         g.setColour(juce::Colour(0xFF00E050));
         static auto typeface = juce::Typeface::createSystemTypefaceFor(
             BinaryData::digital7_ttf, BinaryData::digital7_ttfSize);
-        g.setFont(juce::Font(typeface).withHeight(11.0f));
+        g.setFont(juce::Font(juce::FontOptions().withTypeface(typeface).withHeight(11.0f)));
         g.drawFittedText(text, getLocalBounds().reduced(4, 2), juce::Justification::centred, 1);
     }
 
@@ -285,6 +285,10 @@ private:
     juce::ToggleButton soloDryButton, soloWetButton;
     juce::ToggleButton bypassTimeButton, bypassAmpButton, bypassPitchButton;
     juce::ToggleButton invertTimeButton, invertAmpButton, invertPitchButton;
+
+    // ===== SEC2 bottom buttons =====
+    juce::ToggleButton dtwEnableButton;
+    juce::ToggleButton saturateButton;
 
     void timerCallback() override;
 

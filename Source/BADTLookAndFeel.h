@@ -144,7 +144,43 @@ public:
         const bool toggled = button.getToggleState();
         const auto id      = button.getComponentID();
 
-        if (id == "ap")
+        if (id == "magic")
+        {
+            // ---- DTW match: dark teal off, glowing cyan on ----
+            const float corner = 5.0f;
+            g.setColour(toggled ? juce::Colour(0xFF0A4050) : juce::Colour(0xFF1A2030));
+            g.fillRoundedRectangle(bounds, corner);
+            if (toggled)
+            {
+                g.setColour(juce::Colour(0xFF00D4CC).withAlpha(0.5f));
+                g.drawRoundedRectangle(bounds.expanded(1.0f), corner + 1.0f, 2.5f);
+            }
+            g.setColour(toggled ? juce::Colour(0xFF00D4CC) : juce::Colour(0xFF3A4050));
+            g.drawRoundedRectangle(bounds, corner, 1.5f);
+            g.setFont(juce::Font(juce::FontOptions().withHeight(10.0f).withStyle("Bold")));
+            g.setColour(toggled ? juce::Colour(0xFF00FFEE) : juce::Colour(0xFF5A6070));
+            g.drawFittedText(button.getButtonText(), button.getLocalBounds(),
+                             juce::Justification::centred, 1);
+        }
+        else if (id == "sat")
+        {
+            // ---- Saturate: dark charcoal off, warm amber on ----
+            const float corner = 5.0f;
+            g.setColour(toggled ? juce::Colour(0xFF3D2000) : juce::Colour(0xFF1A1810));
+            g.fillRoundedRectangle(bounds, corner);
+            if (toggled)
+            {
+                g.setColour(juce::Colour(0xFFE08020).withAlpha(0.5f));
+                g.drawRoundedRectangle(bounds.expanded(1.0f), corner + 1.0f, 2.5f);
+            }
+            g.setColour(toggled ? juce::Colour(0xFFE08020) : juce::Colour(0xFF3A3828));
+            g.drawRoundedRectangle(bounds, corner, 1.5f);
+            g.setFont(juce::Font(juce::FontOptions().withHeight(10.0f).withStyle("Bold")));
+            g.setColour(toggled ? juce::Colour(0xFFFFB050) : juce::Colour(0xFF5A5840));
+            g.drawFittedText(button.getButtonText(), button.getLocalBounds(),
+                             juce::Justification::centred, 1);
+        }
+        else if (id == "ap")
         {
             // ---- 3D Metallic Rocker Switch ----
             const float corner = bounds.getHeight() * 0.4f;

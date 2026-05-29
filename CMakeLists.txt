@@ -47,13 +47,14 @@ add_subdirectory(${JUCE_PATH} "${CMAKE_CURRENT_BINARY_DIR}/JUCE")
 # The file must stay at its original location relative to the rest of the
 # Rubber Band source tree so its internal relative #includes resolve correctly.
 
-set(RUBBERBAND_PATH "ThirdParty/rubberband-4.0.0")
+set(RUBBERBAND_PATH  "ThirdParty/rubberband-4.0.0")
+set(AQUILA_DTW_PATH  "ThirdParty/aquila-dtw")
 
 # =============================================================================
 # BINARY DATA (embedded fonts, images, etc.)
 # =============================================================================
 juce_add_binary_data(BADT_BinaryData
-    SOURCES ThirdParty/fonts/digital-7.ttf
+    SOURCES ThirdParty/Font/digital_7/digital-7.ttf
 )
 
 # =============================================================================
@@ -142,6 +143,8 @@ target_sources(BADT
         Source/PluginEditor.cpp
         # Rubber Band Library — single-file build (built-in FFT + resampler, no extra deps)
         ${RUBBERBAND_PATH}/single/RubberBandSingle.cpp
+        # Aquila DSP — DTW only (MIT, Zbigniew Siciarz, v3.0.0-dev)
+        ${AQUILA_DTW_PATH}/aquila/ml/Dtw.cpp
 )
 
 # =============================================================================
@@ -154,6 +157,7 @@ target_sources(BADT
 target_include_directories(BADT
     PRIVATE
         ${RUBBERBAND_PATH}
+        ${AQUILA_DTW_PATH}
 )
 
 # =============================================================================

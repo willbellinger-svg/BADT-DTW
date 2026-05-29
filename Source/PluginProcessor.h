@@ -384,6 +384,18 @@ public:
     std::atomic<bool> invertAmp   { false };
     std::atomic<bool> invertPitch { false };
 
+    // ---- Wet-chain extras ----
+    std::atomic<bool> saturateEnabled { false };
+
+    // ---- DTW matching ----
+    std::atomic<bool>  dtwEnabled { false };
+    std::atomic<float> dtwDelayOffsetSamples { 0.0f };
+
+    static constexpr int DTW_FEATURE_COUNT = 32;
+    float dtwDryFeatures[DTW_FEATURE_COUNT] {};
+    float dtwWetFeatures[DTW_FEATURE_COUNT] {};
+    std::atomic<int> dtwWritePos { 0 };
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 

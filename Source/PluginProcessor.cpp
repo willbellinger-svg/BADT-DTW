@@ -36,6 +36,12 @@ static constexpr float  DELAY_CHASE_RATE = 0.0003f;
 static constexpr float PITCH_NORM_MIN_HZ =    0.0f;
 static constexpr float PITCH_NORM_MAX_HZ = 1000.0f;
 
+// Tape saturation — Langevin-function waveshaper (anhysteretic Jiles-Atherton curve).
+// Inspired by CHOW Tape Model (Jatin Chowdhury, MIT License).  L(q) = coth(q) - 1/q.
+// kSatScale normalises small-signal slope to unity gain.
+static constexpr float kSatDrive = 2.0f;
+static constexpr float kSatScale = 3.0f / kSatDrive;
+
 
 // =============================================================================
 // Constructor / Destructor
@@ -421,9 +427,15 @@ void BADTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     // Step 2: Block-level modulation values
     // -------------------------------------------------------------------------
 
-    const float rawDelayTarget = bypassTime.load(std::memory_order_relaxed)
-                                 ? 0.0f
-                                 : computeTargetDelaySamples(ts, smoothedTimeSS);
+    float rawDelayTarget = bypassTime.load(std::memory_order_relaxed)
+                          ? 0.0f
+                          : computeTargetDelaySamples(ts, smoothedTimeSS);
+    if (dtwEnabled.load(std::memory_order_relaxed))
+    {
+        const float offset = dtwDelayOffsetSamples.load(std::memory_order_relaxed);
+        rawDelayTarget = juce::jlimit(0.0f, static_cast<float>(maxDelaySamples - 1),
+                                      rawDelayTarget + offset);
+    }
 
     // Pre-smooth the target before the per-sample chase to reduce high-frequency jitter.
     smoothedDelayTarget += static_cast<float>(delaySmoothAlpha) * (rawDelayTarget - smoothedDelayTarget);
@@ -483,6 +495,20 @@ void BADTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         wetWorkBuffer[static_cast<size_t>(i)] = delayBuffer.readDelayedInterpolated(pos);
     }
 
+    // --- Step 3.5: Tape saturation ---
+    // Langevin waveshaper: L(q) = coth(q) - 1/q.  Inspired by CHOW Tape Model.
+    if (saturateEnabled.load(std::memory_order_relaxed))
+    {
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float q = wetWorkBuffer[static_cast<size_t>(i)] * kSatDrive;
+            const float lq = (std::abs(q) < 0.001f)
+                             ? q / 3.0f
+                             : (1.0f / std::tanh(q) - 1.0f / q);
+            wetWorkBuffer[static_cast<size_t>(i)] = lq * kSatScale;
+        }
+    }
+
     // --- Step 4: Dry EQ ---
     for (int i = 0; i < numSamples; ++i)
     {
@@ -515,6 +541,23 @@ void BADTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         float* wetPtr = wetWorkBuffer.data();
         juce::dsp::AudioBlock<float> wetBlock(&wetPtr, 1, static_cast<size_t>(numSamples));
         wetLimiter.process(juce::dsp::ProcessContextReplacing<float>(wetBlock));
+    }
+
+    // --- Step 7c: DTW feature collection ---
+    if (dtwEnabled.load(std::memory_order_relaxed))
+    {
+        float drySum = 0.0f, wetSum = 0.0f;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float d = dryWorkBuffer[static_cast<size_t>(i)];
+            const float w = wetWorkBuffer[static_cast<size_t>(i)];
+            drySum += d * d;  wetSum += w * w;
+        }
+        const float invN = 1.0f / static_cast<float>(numSamples);
+        const int pos = dtwWritePos.load(std::memory_order_relaxed);
+        dtwDryFeatures[pos] = std::sqrt(drySum * invN);
+        dtwWetFeatures[pos] = std::sqrt(wetSum * invN);
+        dtwWritePos.store((pos + 1) % DTW_FEATURE_COUNT, std::memory_order_relaxed);
     }
 
     // --- Step 8: Pan, mix, write stereo output ---

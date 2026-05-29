@@ -2,6 +2,7 @@
 // PluginEditor.cpp  —  BADT GUI
 // =============================================================================
 #include "PluginEditor.h"
+#include "aquila/ml/Dtw.h"
 
 // =============================================================================
 // Layout constants
@@ -40,13 +41,20 @@ static constexpr int BYP_W      = (KNOB_W - 2) / 2;  // BYP and INV share the ro
 static constexpr int DBG_Y      = BYP_Y + BYP_H + 2;
 static constexpr int DBG_H      = 16;
 
-// Section 2 — LFO
-static constexpr int LFO_KNOB_W = 48;
-static constexpr int LFO_KNOB_H = 68;
-static constexpr int LFO_LBL_Y  = 6;   static constexpr int LFO_LBL_H = 13;
-static constexpr int LFO_KNOB1_Y = LFO_LBL_Y + LFO_LBL_H + 2;   // rate knob
-static constexpr int LFO_KNOB2_Y = LFO_KNOB1_Y + LFO_KNOB_H + 4; // depth knob
-static constexpr int LFO_X      = SEC2_X + (SEC2_W - LFO_KNOB_W) / 2;
+// Section 2 — LFO + bottom buttons
+static constexpr int LFO_KNOB_W  = 48;
+static constexpr int LFO_KNOB_H  = 56;   // compressed from 68 to make room for buttons
+static constexpr int LFO_LBL_Y   = 6;    static constexpr int LFO_LBL_H = 13;
+static constexpr int LFO_KNOB1_Y = LFO_LBL_Y + LFO_LBL_H + 2;
+static constexpr int LFO_KNOB2_Y = LFO_KNOB1_Y + LFO_KNOB_H + 4;
+static constexpr int LFO_X       = SEC2_X + (SEC2_W - LFO_KNOB_W) / 2;
+
+// Two buttons at the bottom of SEC2: [Magic] [Saturate]
+static constexpr int SEC2_BTN_H  = 22;
+static constexpr int SEC2_BTN_Y  = WINDOW_HEIGHT - 6 - SEC2_BTN_H;
+static constexpr int SEC2_BTN_W  = (SEC2_W - 20) / 2;                // 46px each
+static constexpr int SEC2_BTN_X1 = SEC2_X + (SEC2_W - (2 * SEC2_BTN_W + 4)) / 2;
+static constexpr int SEC2_BTN_X2 = SEC2_BTN_X1 + SEC2_BTN_W + 4;
 
 // Section 3 — Wet/Dry
 static constexpr int S3_DVOL_X  = SEC3_X + 4;
@@ -241,6 +249,26 @@ BADTEditor::BADTEditor(BADTAudioProcessor& p)
     setupSolo(soloDryButton, "SOLO DRY", audioProcessor.soloDry);
     setupSolo(soloWetButton, "SOLO WET", audioProcessor.soloWet);
 
+    // ── Magic (DTW) button ───────────────────────────────────────────────────
+    dtwEnableButton.setButtonText("Magic");
+    dtwEnableButton.setComponentID("magic");
+    dtwEnableButton.onStateChange = [this]()
+    {
+        const bool on = dtwEnableButton.getToggleState();
+        audioProcessor.dtwEnabled.store(on, std::memory_order_relaxed);
+        if (!on) audioProcessor.dtwDelayOffsetSamples.store(0.0f, std::memory_order_relaxed);
+    };
+    addAndMakeVisible(dtwEnableButton);
+
+    // ── Saturate button ──────────────────────────────────────────────────────
+    saturateButton.setButtonText("Saturate");
+    saturateButton.setComponentID("sat");
+    saturateButton.onStateChange = [this]() {
+        audioProcessor.saturateEnabled.store(saturateButton.getToggleState(),
+                                              std::memory_order_relaxed);
+    };
+    addAndMakeVisible(saturateButton);
+
     // ── VU meters ────────────────────────────────────────────────────────────
     addAndMakeVisible(outputVUL);
     addAndMakeVisible(outputVUR);
@@ -385,11 +413,13 @@ void BADTEditor::resized()
     ampDisplay  .setBounds(COL_AMP,   DBG_Y, KNOB_W, DBG_H);
     pitchDisplay.setBounds(COL_PITCH, DBG_Y, KNOB_W, DBG_H);
 
-    // ── Section 2: LFO ───────────────────────────────────────────────────────
+    // ── Section 2: LFO + buttons ─────────────────────────────────────────────
     lfoRateLabel .setBounds(LFO_X, LFO_LBL_Y,   LFO_KNOB_W, LFO_LBL_H);
     lfoRateKnob  .setBounds(LFO_X, LFO_KNOB1_Y, LFO_KNOB_W, LFO_KNOB_H);
     lfoDepthLabel.setBounds(LFO_X, LFO_KNOB1_Y + LFO_KNOB_H + 2, LFO_KNOB_W, LFO_LBL_H);
     lfoDepthKnob .setBounds(LFO_X, LFO_KNOB2_Y, LFO_KNOB_W, LFO_KNOB_H);
+    dtwEnableButton.setBounds(SEC2_BTN_X1, SEC2_BTN_Y, SEC2_BTN_W, SEC2_BTN_H);
+    saturateButton .setBounds(SEC2_BTN_X2, SEC2_BTN_Y, SEC2_BTN_W, SEC2_BTN_H);
 
     // ── Section 3: Wet/Dry controls ──────────────────────────────────────────
     // Labels
@@ -424,6 +454,37 @@ void BADTEditor::resized()
 // =============================================================================
 void BADTEditor::timerCallback()
 {
+    // ── DTW analysis (message thread — allocation is safe here) ──────────────
+    if (audioProcessor.dtwEnabled.load(std::memory_order_relaxed))
+    {
+        const int writePos = audioProcessor.dtwWritePos.load(std::memory_order_relaxed);
+        Aquila::DtwDataType drySeq, wetSeq;
+        drySeq.reserve(BADTAudioProcessor::DTW_FEATURE_COUNT);
+        wetSeq.reserve(BADTAudioProcessor::DTW_FEATURE_COUNT);
+        for (int i = 0; i < BADTAudioProcessor::DTW_FEATURE_COUNT; ++i)
+        {
+            const int idx = (writePos + i) % BADTAudioProcessor::DTW_FEATURE_COUNT;
+            drySeq.push_back({ static_cast<double>(audioProcessor.dtwDryFeatures[idx]) });
+            wetSeq.push_back({ static_cast<double>(audioProcessor.dtwWetFeatures[idx]) });
+        }
+        Aquila::Dtw dtw;
+        dtw.getDistance(drySeq, wetSeq);
+        const auto path = dtw.getPath();
+        if (!path.empty())
+        {
+            double totalLag = 0.0;
+            for (const auto& pt : path)
+                totalLag += static_cast<double>(pt.x) - static_cast<double>(pt.y);
+            const float rawOffset = static_cast<float>(totalLag / static_cast<double>(path.size()))
+                                    * static_cast<float>(audioProcessor.getBlockSize())
+                                    * 0.25f;
+            const float cur = audioProcessor.dtwDelayOffsetSamples.load(std::memory_order_relaxed);
+            audioProcessor.dtwDelayOffsetSamples.store(cur + 0.1f * (rawOffset - cur),
+                                                        std::memory_order_relaxed);
+        }
+    }
+
+    // ── Debug display updates ─────────────────────────────────────────────────
     const float delayMs    = audioProcessor.displayDelayMs.load(std::memory_order_relaxed);
     const float ampDB      = audioProcessor.displayAmpDB.load(std::memory_order_relaxed);
     const float pitchCents = audioProcessor.displayPitchCents.load(std::memory_order_relaxed);
